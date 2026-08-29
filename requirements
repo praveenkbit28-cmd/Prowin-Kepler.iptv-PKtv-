@@ -1,0 +1,15 @@
+customtkinter>=5.2.2
+requests>=2.31.0
+python-vlc>=3.0.20123
+yt-dlp>=2024.12.13
+pygame>=2.5.2
+Install all dependencies with:
+
+pip install -r requirements.txt
+You must also install 64-bit VLC Media Player separately:
+
+https://www.videolan.org/vlc/
+
+For downloading and converting YouTube audio/video, install FFmpeg as well:
+
+https://ffmpeg.org/download.html
