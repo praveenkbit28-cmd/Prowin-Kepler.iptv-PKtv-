@@ -1,0 +1,2704 @@
+#!/usr/bin/env python3
+"""
+ProwinKepler v14
+• Nested menus (menu-into-menu)
+• Icon rail: TV (monitor) · Movies (play) · Podcast (mic) · Audiobook (book) · AV-Player (file)
+• Unified advanced player for every section:
+  ▶ Play  ⏸ Pause  🛑 Stop  🔁 Loop  🔉 Volume  🔕 Mute
+  S / M / L / XL  ·  ⏪10m  ⏩10m  ·  📹 Speed  ·  CC Subtitle
+  ON AIR live label (TV + FM only)
+• Settings gear → subtitle file, audio language, speed
+• Lyrics panel, Refresh, Quit (🔓)
+• Top bar: correct time + date
+• Download for Music / Podcast / Audiobook / YouTube
+• Local tv.txt first (thousands of channels) + IPTV-org fallback
+• 2000+ TV / 2000+ FM / 1000+ Music / Podcast / Audiobook targets
+"""
+
+import io, sys, threading, urllib.request, random, os, re, time, datetime, glob
+
+try:
+    import customtkinter as ctk
+except ImportError:
+    print("pip install customtkinter"); sys.exit(1)
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+
+def _fix_vlc_path():
+    if sys.platform != "win32":
+        return None
+    for p in [
+        r"C:\Program Files\VideoLAN\VLC",
+        r"C:\Program Files (x86)\VideoLAN\VLC",
+        os.path.expandvars(r"%PROGRAMFILES%\VideoLAN\VLC"),
+        os.path.expandvars(r"%PROGRAMFILES(X86)%\VideoLAN\VLC"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\VideoLAN\VLC"),
+    ]:
+        if os.path.isfile(os.path.join(p, "libvlc.dll")):
+            os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+            os.environ["PYTHON_VLC_MODULE_PATH"] = p
+            print(f"[VLC] {p}")
+            return p
+    print("[VLC] Install 64-bit from videolan.org")
+    return None
+
+_fix_vlc_path()
+VLC_AVAILABLE = False
+vlc = None
+try:
+    import vlc
+    VLC_AVAILABLE = True
+except Exception as e:
+    print(f"[VLC] {e}")
+
+try:
+    import pygame
+    PYGAME_AVAILABLE = True
+    pygame.mixer.init()
+except Exception:
+    PYGAME_AVAILABLE = False
+
+try:
+    import requests
+except ImportError:
+    print("pip install requests"); sys.exit(1)
+
+YTDLP_AVAILABLE = False
+try:
+    import yt_dlp
+    YTDLP_AVAILABLE = True
+except ImportError:
+    pass
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("dark-blue")
+
+# Theme: Neon Aurora UI v2 — sharper glass panels + teal/magenta contrast
+C = {
+    "bg": "#020c10",
+    "sidebar": "#04151c",
+    "card": "#0b1f28",
+    "card2": "#102a35",
+    "card_hover": "#1a4555",
+    "accent": "#00f5d4",
+    "accent2": "#ff2d95",
+    "fg": "#eefcff",
+    "muted": "#6b9eae",
+    "success": "#39ff14",
+    "warning": "#ffc107",
+    "error": "#ff4d6d",
+    "glass": "#081c24",
+    "glass_border": "#1f6a80",
+    "header": "#031016",
+    "glow": "#00f5d4",
+    "rail_active": "#0d3a44",
+    "row": "#0a1a22",
+    "row_alt": "#0c222c",
+    "play_btn": "#00f5d4",
+    "stop_btn": "#ff3355",
+}
+
+DEFAULT_LAT, DEFAULT_LON = 13.0827, 80.2707
+
+# ---------------------------------------------------------------------------
+# IPTV-org sources
+# ---------------------------------------------------------------------------
+IPTV_BASE = "https://iptv-org.github.io/iptv"
+IPTV_SOURCES = {
+    "news": f"{IPTV_BASE}/categories/news.m3u",
+    "sports": f"{IPTV_BASE}/categories/sports.m3u",
+    "entertainment": f"{IPTV_BASE}/categories/entertainment.m3u",
+    "music": f"{IPTV_BASE}/categories/music.m3u",
+    "kids": f"{IPTV_BASE}/categories/kids.m3u",
+    "movies": f"{IPTV_BASE}/categories/movies.m3u",
+    "documentary": f"{IPTV_BASE}/categories/documentary.m3u",
+    "education": f"{IPTV_BASE}/categories/education.m3u",
+    "animation": f"{IPTV_BASE}/categories/animation.m3u",
+    "series": f"{IPTV_BASE}/categories/series.m3u",
+    "cooking": f"{IPTV_BASE}/categories/cooking.m3u",
+    "comedy": f"{IPTV_BASE}/categories/comedy.m3u",
+    "auto": f"{IPTV_BASE}/categories/auto.m3u",
+    "business": f"{IPTV_BASE}/categories/business.m3u",
+    "culture": f"{IPTV_BASE}/categories/culture.m3u",
+    "outdoor": f"{IPTV_BASE}/categories/outdoor.m3u",
+    "science": f"{IPTV_BASE}/categories/science.m3u",
+    "travel": f"{IPTV_BASE}/categories/travel.m3u",
+    "weather": f"{IPTV_BASE}/categories/weather.m3u",
+    "in": f"{IPTV_BASE}/countries/in.m3u",
+    "us": f"{IPTV_BASE}/countries/us.m3u",
+    "uk": f"{IPTV_BASE}/countries/uk.m3u",
+    "au": f"{IPTV_BASE}/countries/au.m3u",
+    "ca": f"{IPTV_BASE}/countries/ca.m3u",
+    "sg": f"{IPTV_BASE}/countries/sg.m3u",
+    "ph": f"{IPTV_BASE}/countries/ph.m3u",
+    "my": f"{IPTV_BASE}/countries/my.m3u",
+    "lk": f"{IPTV_BASE}/countries/lk.m3u",
+    "pk": f"{IPTV_BASE}/countries/pk.m3u",
+    "bd": f"{IPTV_BASE}/countries/bd.m3u",
+    "np": f"{IPTV_BASE}/countries/np.m3u",
+}
+
+def parse_m3u(text, limit=20000):
+    items = []
+    name = None
+    logo = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("#EXTINF"):
+            m_logo = re.search(r'(?:tvg-logo|logo)="([^"]+)"', line, re.I)
+            logo = m_logo.group(1) if m_logo else ""
+            if "," in line:
+                name = line.split(",", 1)[1].strip()
+            else:
+                name = "Channel"
+            name = re.sub(r"\s*\[[^\]]*\]", "", name)
+            name = re.sub(r"\s*\([^)]*\)", "", name)
+            name = re.sub(r"\s+HD\b", "", name, flags=re.I)
+            name = re.sub(r"\s+SD\b", "", name, flags=re.I)
+            name = re.sub(r"\s+\d{3,4}p\b", "", name, flags=re.I)
+            name = re.sub(r"\s{2,}", " ", name).strip()
+            if not name or len(name) < 2:
+                name = None
+        elif line.startswith("http") and name:
+            low = line.lower()
+            if not any(x in low for x in (".jpg", ".png", ".gif", ".jpeg", ".svg", ".webp")):
+                items.append((name, line, "video", logo))
+            name = None
+            logo = ""
+            if len(items) >= limit:
+                break
+    seen = set()
+    unique = []
+    for item in items:
+        k = item[0].lower().strip()
+        if k not in seen:
+            seen.add(k)
+            unique.append(item)
+    return unique
+
+# Simple in-memory cache so the same IPTV category is not re-downloaded
+_IPTV_CACHE = {}
+
+def fetch_iptv(key, limit=200):
+    """Fast IPTV-org fetch — short timeout, cached, small limit."""
+    if key in _IPTV_CACHE:
+        return _IPTV_CACHE[key][:limit]
+    url = IPTV_SOURCES.get(key)
+    if not url:
+        return []
+    try:
+        r = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0 (ProwinKepler/14)"})
+        r.raise_for_status()
+        items = parse_m3u(r.text, limit)
+        _IPTV_CACHE[key] = items
+        return items[:limit]
+    except Exception as e:
+        print(f"[IPTV {key}] {e}")
+        return []
+
+# ---------------------------------------------------------------------------
+# Curated free streams + Tamil TV / FM
+# ---------------------------------------------------------------------------
+FREE_LIVE = [
+    ("Test Stream", "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8", "video"),
+    ("NASA TV", "https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8", "video"),
+    ("Al Jazeera", "https://live-hls-apps-aje-fa.getaj.net/AJE/index.m3u8", "video"),
+    ("DW News", "https://dwamdstream102.akamaized.net/hls/live/2015525/dwstream102/index.m3u8", "video"),
+    ("CBS News", "https://cbsnews.akamaized.net/hls/live/2020607/cbsnlineup_8/master.m3u8", "video"),
+    ("France 24", "https://ythls.armelin.one/channel/UCQfwfsi5VrK8HEfdnCO7q0g.m3u8", "video"),
+    ("NHK World", "https://ythls.armelin.one/channel/UCkKVQ_G-xtc9HkBud9KaO5Q.m3u8", "video"),
+    ("Euronews", "https://euronews.alteox.app/hls/en_stream.m3u8", "video"),
+]
+
+TAMIL_TV = [
+    ("Sun TV HD", "https://yuppmedtaorire.akamaized.net/v1/master/a0d007312bfd99c47f76b77ae26b1cda868ae2f2/SunTV_HD/master.m3u8", "video"),
+    ("Vijay TV HD", "https://yuppmedtaorire.akamaized.net/v1/master/a0d007312bfd99c47f76b77ae26b1cda868ae2f2/StarVijay_HD/master.m3u8", "video"),
+    ("Zee Tamil HD", "https://yuppmedtaorire.akamaized.net/v1/master/a0d007312bfd99c47f76b77ae26b1cda868ae2f2/ZeeTamil_HD/master.m3u8", "video"),
+    ("Colors Tamil HD", "https://yuppmedtaorire.akamaized.net/v1/master/a0d007312bfd99c47f76b77ae26b1cda868ae2f2/ColorsTamil_HD/master.m3u8", "video"),
+    ("KTV HD", "https://yuppmedtaorire.akamaized.net/v1/master/a0d007312bfd99c47f76b77ae26b1cda868ae2f2/KTV_HD/master.m3u8", "video"),
+    ("Puthiya Thalaimurai", "https://ythls.armelin.one/channel/UCmyKnNRH0wH-r8I-ceP-dsg.m3u8", "video"),
+    ("Thanthi TV", "https://ythls.armelin.one/channel/UC8dnSh4HCK94jJ6m5e_4G1g.m3u8", "video"),
+    ("News18 Tamil", "https://ythls.armelin.one/channel/UCat88i6_rELqI_pJiSAHAfA.m3u8", "video"),
+    ("Raj TV", "https://livestream.rajtv.tv/hlslive/Admin/px08241087/live/RAJTV/master_1.m3u8", "video"),
+    ("Polimer TV", "https://mumt04.tangotv.in/m18aqlK4POLIMERTV/index.m3u8", "video"),
+    ("Polimer News", "https://mumt05.tangotv.in/87NeALx2POLIMERNEWS/index.m3u8", "video"),
+    ("News7 Tamil", "https://mumt02.tangotv.in/NEWS7TAMIL/index.m3u8", "video"),
+    ("Thanthi One", "https://mumt07.tangotv.in/zHjX9OFlTHANTHIONE/index.m3u8", "video"),
+    ("Makkal TV", "https://mumt01.tangotv.in/O5aw8Zn3MAKKALTV/index.m3u8", "video"),
+    ("Vendhar TV", "https://mumt04.tangotv.in/m18aqlK4VENDHARTV/index.m3u8", "video"),
+    ("Vasanth TV", "https://mumt04.tangotv.in/m18aqlK4VASANTHTV/index.m3u8", "video"),
+    ("Nambikkai TV", "https://mumt02.tangotv.in/NAMBIKKAITV/index.m3u8", "video"),
+    ("Sathiyam TV", "https://mumt07.tangotv.in/zHjX9OFlSATHIYAMTV/index.m3u8", "video"),
+    ("DD Tamil", "https://mumt04.tangotv.in/m18aqlK4DDTAMIL/index.m3u8", "video"),
+    ("Moon TV", "https://mumt03.tangotv.in/Dsly5z3HMOONTV/index.m3u8", "video"),
+    # Extra Tamil / regional streams (VLC HLS)
+    ("Succes TV Tamil", "https://stream.onecloudlive.in/successtv/successtvhd/index.m3u8", "video"),
+    ("Tamil Oli TV", "https://view.rcserver.in/tmp_hls7/tamilolitv/index.m3u8", "video"),
+    ("RJ Tamil", "https://ipcloud.live/rjtamiltv/rjtamil/index.m3u8", "video"),
+    ("Annai Tamil", "https://annainew.livebox.co.in/annaitamilhls/live.m3u8", "video"),
+    ("Tamilnesan TV", "https://view.rcserver.in/tmp_hls14/tntv/index.m3u8", "video"),
+    ("Hello Tamil TV", "https://view.rcserver.in/tmp_hls26/hellotamiltv/index.m3u8", "video"),
+    ("RV Tamil", "https://ipcloud.live/rvtv/rvtvhd/index.m3u8", "video"),
+    ("V Tamil", "https://hlsstream.olidigital.in/vtv/vtv/index.m3u8", "video"),
+    ("Bakthi Tamil", "https://rtmp.bmlive.net/stream/bakthitamil/index.m3u8", "video"),
+    ("Thalaa TV", "https://streams2.sofast.tv/v1/master/611d79b11b77e2f571934fd80ca1413453772ac7/2069c593-3c07-4d62-9d44-746be5c3a5d6/manifest.m3u8", "video"),
+]
+
+# Cartoon / Kids — play with VLC (HLS)
+CARTOON_TV = [
+    ("Cartoon Classics", "https://streams2.sofast.tv/v1/master/611d79b11b77e2f571934fd80ca1413453772ac7/d5543c06-5122-49a7-9662-32187f48aa2c/manifest.m3u8", "video"),
+    ("Kartoon Channel", "https://streams2.sofast.tv/v1/master/611d79b11b77e2f571934fd80ca1413453772ac7/d5543c06-5122-49a7-9662-32187f48aa2c/manifest.m3u8", "video"),
+    ("Baby Shark TV", "https://ads.its-newid.net/api/manifest.m3u8?ads.service_id=US17000208H&channel_id=newid_346&tp=samsung_tvplus", "video"),
+    ("Blippi", "https://d2p70ev1g5q1aj.cloudfront.net/Blippi_SONO46.m3u8", "video"),
+    ("Barbie and Friends", "https://d1xqdnwy1bo05f.cloudfront.net/barb.m3u8", "video"),
+    ("Caillou", "https://d2mshoh3usf646.cloudfront.net/playlist.m3u8", "video"),
+    ("Baby Einstein", "https://ds25p79iq4576.cloudfront.net/master.m3u8", "video"),
+    ("BBC Kids", "https://dmr1h4skdal9h.cloudfront.net/playlist.m3u8", "video"),
+    ("Toon Goggles", "https://d24c0gmuazjo9x.cloudfront.net/master.m3u8", "video"),
+    ("DuckTV", "https://d6lk10bkdgfae.cloudfront.net/playlist.m3u8", "video"),
+    ("Naruto", "https://dvu7aia8rjlfm.cloudfront.net/master.m3u8", "video"),
+    ("FilmRise Anime", "https://dvu7aia8rjlfm.cloudfront.net/master.m3u8", "video"),
+    # Free always-on kids-friendly test / news-free streams also usable as backup
+    ("NASA TV (Kids Space)", "https://ntv1.akamaized.net/hls/live/2014075/NASA-NTV1-HLS/master.m3u8", "video"),
+]
+
+TAMIL_FM = [
+    ("Suryan FM", "https://suryanfm.akamaized.net/hls/live/2038908/SuryanFM/master.m3u8", "audio"),
+    ("Radio Mirchi Tamil", "https://mirchitamil.akamaized.net/hls/live/2038909/MirchiTamil/master.m3u8", "audio"),
+    ("Hello FM", "https://hellofm.akamaized.net/hls/live/2038910/HelloFM/master.m3u8", "audio"),
+    ("Big FM Tamil", "https://bigfmtamil.akamaized.net/hls/live/2038911/BigFMTamil/master.m3u8", "audio"),
+]
+
+# ---------------------------------------------------------------------------
+# Load local tv.txt
+# ---------------------------------------------------------------------------
+def _parse_m3u_file(path):
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read().replace("\r\n", "\n").replace("\r", "\n")
+        return parse_m3u(text, limit=25000)
+    except Exception as e:
+        print(f"[M3U file] {e}")
+        return []
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_TV_SAVE_PATH = os.path.join(_SCRIPT_DIR, "tv.txt")
+_M3U_PATHS = [
+    os.path.join(_SCRIPT_DIR, "tv.txt"),
+    os.path.join(os.getcwd(), "tv.txt"),
+    os.path.join(os.path.dirname(os.getcwd()), "tv.txt"),
+    r"C:\Users\Praveen Kalidass\Downloads\tv.txt",
+    r"C:\Users\Praveen Kalidass\Desktop\tv.txt",
+    os.path.expanduser(r"~\Downloads\tv.txt"),
+    os.path.expanduser(r"~\Desktop\tv.txt"),
+    os.path.expanduser(r"~\Documents\tv.txt"),
+    "/home/workdir/artifacts/tv.txt",
+    "/home/workdir/attachments/tv.txt",
+]
+ALL_TV = []
+_TV_LOADED_FROM = None
+for _p in _M3U_PATHS:
+    ALL_TV = _parse_m3u_file(_p)
+    if ALL_TV:
+        _TV_LOADED_FROM = _p
+        print(f"[TV] Loaded {len(ALL_TV)} channels from {_p}")
+        break
+if not ALL_TV:
+    print("[TV] tv.txt not found — trying IPTV-org download…")
+    try:
+        for _key in ("in", "news", "entertainment", "movies", "kids"):
+            ALL_TV.extend(fetch_iptv(_key, limit=150))
+        # dedupe
+        _seen = set()
+        _uniq = []
+        for it in ALL_TV:
+            k = it[0].lower().strip()
+            if k not in _seen:
+                _seen.add(k)
+                _uniq.append(it)
+        ALL_TV = _uniq
+        if ALL_TV:
+            # save for next launch
+            try:
+                with open(_TV_SAVE_PATH, "w", encoding="utf-8") as f:
+                    f.write("#EXTM3U\n")
+                    for name, url, *_rest in ALL_TV:
+                        f.write(f'#EXTINF:-1,{name}\n{url}\n')
+                print(f"[TV] Saved {len(ALL_TV)} channels → {_TV_SAVE_PATH}")
+                _TV_LOADED_FROM = _TV_SAVE_PATH
+            except Exception as e:
+                print(f"[TV] save failed: {e}")
+    except Exception as e:
+        print(f"[TV] IPTV bootstrap failed: {e}")
+if ALL_TV:
+    print(f"[TV] Ready: {len(ALL_TV)} unique channels")
+else:
+    print("[TV] No channels — only curated FREE_LIVE / TAMIL lists available")
+
+# Precompute lowercase names once → filter is O(n) without repeated .lower()
+_ALL_TV_LOW = [(c, c[0].lower()) for c in ALL_TV] if ALL_TV else []
+
+def refresh_iptv_to_file(keys=None, limit_each=200):
+    """Download IPTV-org lists and write tv.txt next to the app."""
+    global ALL_TV, _ALL_TV_LOW, _TV_LOADED_FROM
+    keys = keys or ["in", "us", "news", "sports", "entertainment", "movies", "kids", "music", "documentary"]
+    items = []
+    for k in keys:
+        items.extend(fetch_iptv(k, limit=limit_each))
+    seen = set()
+    uniq = []
+    for it in items:
+        key = it[0].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            uniq.append(it)
+    if not uniq:
+        return 0
+    try:
+        with open(_TV_SAVE_PATH, "w", encoding="utf-8") as f:
+            f.write("#EXTM3U\n")
+            for name, url, *_r in uniq:
+                f.write(f"#EXTINF:-1,{name}\n{url}\n")
+        ALL_TV = uniq
+        _ALL_TV_LOW = [(c, c[0].lower()) for c in ALL_TV]
+        _TV_LOADED_FROM = _TV_SAVE_PATH
+        print(f"[TV] Refreshed {len(ALL_TV)} → {_TV_SAVE_PATH}")
+        return len(ALL_TV)
+    except Exception as e:
+        print(f"[TV] refresh write failed: {e}")
+        return 0
+
+def _tv_filter(keywords, source=None, limit=400):
+    """Fast local filter — no network. Default cap 400 for UI speed."""
+    if source is not None:
+        pairs = [(c, c[0].lower()) for c in source]
+    else:
+        pairs = _ALL_TV_LOW
+    if not pairs:
+        return []
+    keys = [k.lower() for k in keywords if k]
+    if not keys:
+        return [c for c, _ in pairs[:limit]]
+    out = []
+    for c, low in pairs:
+        if any(k in low for k in keys):
+            out.append(c)
+            if len(out) >= limit:
+                break
+    return out
+
+# ---------------------------------------------------------------------------
+# Local media helpers (AV-Player / LIBRARY)
+# ---------------------------------------------------------------------------
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".webm", ".mov", ".flv", ".wmv", ".m4v", ".ts", ".m3u8"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav", ".wma", ".aiff"}
+
+def _scan_local_media(folders, want="all", limit=500):
+    items = []
+    seen = set()
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        try:
+            for root, _dirs, files in os.walk(folder):
+                for fn in files:
+                    ext = os.path.splitext(fn)[1].lower()
+                    if want == "video" and ext not in VIDEO_EXTS:
+                        continue
+                    if want == "audio" and ext not in AUDIO_EXTS:
+                        continue
+                    if want == "all" and ext not in VIDEO_EXTS | AUDIO_EXTS:
+                        continue
+                    full = os.path.join(root, fn)
+                    if full in seen:
+                        continue
+                    seen.add(full)
+                    mtype = "video" if ext in VIDEO_EXTS else "audio"
+                    title = os.path.splitext(fn)[0]
+                    items.append((title, full, mtype, ""))
+                    if len(items) >= limit:
+                        return items
+        except Exception as e:
+            print(f"[Local scan] {folder}: {e}")
+    return items
+
+# ---------------------------------------------------------------------------
+# MENU (nested)
+# ---------------------------------------------------------------------------
+MENU = [
+    ("HOME", [
+        ("Dashboard", "home"),
+        ("Trending Now", "trending"),
+        ("Recommended", "recommended"),
+    ]),
+    ("LIVE TV", [
+        ("Tamil Channels", "tv_tamil"),
+        ("Telugu Channels", "tv_telugu"),
+        ("Hindi Channels", "tv_hindi"),
+        ("English Channels", "tv_english"),
+        ("Malayalam Channels", "tv_malayalam"),
+        ("Kannada Channels", "tv_kannada"),
+        ("Bengali Channels", "tv_bengali"),
+        ("Marathi Channels", "tv_marathi"),
+        ("Gujarati Channels", "tv_gujarati"),
+        ("Punjabi Channels", "tv_punjabi"),
+        ("Regional Channels", "tv_regional"),
+        ("International", "tv_intl"),
+        ("News 2000+", "tv_news"),
+        ("Sports", "tv_sports"),
+        ("Entertainment", "tv_ent"),
+        ("Movies TV", "tv_movies"),
+        ("Music TV", "tv_music"),
+        ("Kids", "tv_kids"),
+        ("Cartoon 200+", "tv_cartoon"),
+        ("Education", "tv_edu"),
+        ("Lifestyle", "tv_lifestyle"),
+        ("Travel", "tv_travel"),
+        ("Food", "tv_food"),
+        ("Fashion", "tv_fashion"),
+        ("Science", "tv_science"),
+        ("Technology", "tv_tech"),
+        ("Business", "tv_business"),
+        ("Documentary", "tv_docu"),
+        ("Wildlife", "tv_wildlife"),
+        ("Devotional", "tv_devo"),
+        ("Comedy", "tv_comedy"),
+        ("Reality TV", "tv_reality"),
+        ("Serials / Drama", "tv_serials"),
+        ("Awards Shows", "tv_awards"),
+        ("Live Events", "tv_events"),
+        ("All India", "tv_india"),
+        ("All Channels (2000+)", "tv_all"),
+    ]),
+    ("MOVIES", [
+        ("Trending Now", "mov_trending"),
+        ("Recommended", "mov_recommended"),
+        ("New Releases", "mov_new"),
+        ("Popular", "mov_popular"),
+        ("Top Rated", "mov_toprated"),
+        ("Upcoming", "mov_upcoming"),
+        ("Tamil Movies 200+", "mov_tamil"),
+        ("Kollywood", "mov_kolly"),
+        ("Telugu Movies", "mov_telugu"),
+        ("Hindi Movies", "mov_hindi"),
+        ("Malayalam Movies", "mov_malayalam"),
+        ("Kannada Movies", "mov_kannada"),
+        ("English Movies", "mov_english"),
+        ("Action", "mov_action"),
+        ("Adventure", "mov_adventure"),
+        ("Animation", "mov_anim"),
+        ("Comedy", "mov_comedy"),
+        ("Crime", "mov_crime"),
+        ("Documentary", "mov_docu"),
+        ("Drama", "mov_drama"),
+        ("Family", "mov_family"),
+        ("Fantasy", "mov_fantasy"),
+        ("History", "mov_history"),
+        ("Horror", "mov_horror"),
+        ("Music", "mov_music"),
+        ("Mystery", "mov_mystery"),
+        ("Romance", "mov_romance"),
+        ("Sci-Fi", "mov_scifi"),
+        ("Sports", "mov_sports"),
+        ("Thriller", "mov_thriller"),
+        ("War", "mov_war"),
+        ("Western", "mov_western"),
+        ("Web Series", "mov_series"),
+        ("Trailers", "mov_trailers"),
+    ]),
+    ("YOUTUBE", [
+        ("Trending", "yt_trending"),
+        ("Explore", "yt_explore"),
+        ("Music", "yt_music"),
+        ("Gaming", "yt_gaming"),
+        ("Live", "yt_live"),
+        ("Podcasts", "yt_podcasts"),
+        ("Movies", "yt_movies"),
+        ("TV Shows", "yt_tvshows"),
+        ("News", "yt_news"),
+        ("Sports", "yt_sports"),
+        ("Learning", "yt_learning"),
+        ("Fashion & Beauty", "yt_fashion"),
+        ("Technology", "yt_tech"),
+        ("Science", "yt_science"),
+        ("Travel", "yt_travel"),
+        ("Food & Cooking", "yt_food"),
+        ("Health & Fitness", "yt_health"),
+        ("Comedy", "yt_comedy"),
+        ("Entertainment", "yt_ent"),
+        ("Vlogs", "yt_vlogs"),
+        ("Education", "yt_edu"),
+        ("Kids", "yt_kids"),
+        ("Animation", "yt_anim"),
+        ("DIY & Crafts", "yt_diy"),
+        ("Finance", "yt_finance"),
+        ("History", "yt_history"),
+        ("Nature", "yt_nature"),
+        ("Shorts", "yt_shorts"),
+        ("Recently Uploaded", "yt_recent"),
+        ("Tamil", "yt_lang_tamil"),
+        ("Telugu", "yt_lang_telugu"),
+        ("Hindi", "yt_lang_hindi"),
+        ("Malayalam", "yt_lang_malayalam"),
+        ("Kannada", "yt_lang_kannada"),
+        ("Bengali", "yt_lang_bengali"),
+        ("Marathi", "yt_lang_marathi"),
+        ("English", "yt_lang_en"),
+        ("Korean", "yt_lang_korean"),
+        ("Japanese", "yt_lang_japanese"),
+        ("Spanish", "yt_lang_spanish"),
+        ("Arabic", "yt_lang_arabic"),
+    ]),
+    ("FM RADIO", [
+        ("Tamil FM 2000+", "tamilfm"),
+        ("Local / Chennai FM", "fm_local"),
+        ("Top Stations", "fm_all"),
+        ("Trending Stations", "fm_trending"),
+        ("Search FM", "fm_search"),
+        ("Pop", "fm_pop"),
+        ("Rock", "fm_rock"),
+        ("Classical", "fm_classical"),
+        ("Jazz", "fm_jazz"),
+        ("Blues", "fm_blues"),
+        ("Country", "fm_country"),
+        ("Hip-Hop", "fm_hiphop"),
+        ("Rap", "fm_rap"),
+        ("R&B", "fm_rnb"),
+        ("EDM", "fm_edm"),
+        ("Dance", "fm_dance"),
+        ("Electronic", "fm_electronic"),
+        ("Folk", "fm_folk"),
+        ("Indie", "fm_indie"),
+        ("Alternative", "fm_alt"),
+        ("Metal", "fm_metal"),
+        ("Reggae", "fm_reggae"),
+        ("Soul", "fm_soul"),
+        ("Gospel", "fm_gospel"),
+        ("Devotional", "fm_devo"),
+        ("Instrumental", "fm_instrumental"),
+        ("Lo-Fi", "fm_lofi"),
+        ("Romantic", "fm_romantic"),
+        ("Melody", "fm_melody"),
+        ("Retro / Old Hits", "fm_retro"),
+        ("90s Hits", "fm_90s"),
+        ("2000s Hits", "fm_2000s"),
+        ("Latest Hits", "fm_latest"),
+        ("English FM", "englishfm"),
+        ("Hindi FM", "hindifm"),
+        ("Telugu FM", "fm_telugu"),
+        ("Malayalam FM", "fm_malayalam"),
+        ("Kannada FM", "fm_kannada"),
+        ("Bengali FM", "fm_bengali"),
+        ("Punjabi FM", "fm_punjabi"),
+        ("Arabic FM", "fm_arabic"),
+        ("Korean FM", "fm_korean"),
+        ("Music FM", "fm_music"),
+        ("News FM", "fm_news"),
+        ("Talk Radio", "fm_talk"),
+        ("Sports Radio", "fm_sports"),
+        ("Comedy Radio", "fm_comedy"),
+        ("Devotional Radio", "fm_devo2"),
+        ("Educational Radio", "fm_edu"),
+        ("Community Radio", "fm_community"),
+        ("International FM", "fm_intl"),
+        ("Online / Live Radio", "fm_online"),
+    ]),
+    ("MUSIC", [
+        ("Tamil Hits 1000+", "music_tamil"),
+        ("Hindi Hits", "music_hindi"),
+        ("English Hits", "music_en"),
+        ("Trending", "music_trending"),
+        ("New Releases", "music_new"),
+        ("Top Charts", "music_charts"),
+        ("Movie Songs", "music_movie"),
+        ("Melody", "music_melody"),
+        ("Romantic", "music_romantic"),
+        ("Devotional", "music_devo"),
+        ("Remix", "music_remix"),
+        ("Viral Hits", "music_viral"),
+        ("Lo-Fi", "music_lofi"),
+        ("Pop", "music_pop"),
+        ("Rock", "music_rock"),
+        ("Hip-Hop", "music_hiphop"),
+        ("Rap", "music_rap"),
+        ("R&B", "music_rnb"),
+        ("EDM", "music_edm"),
+        ("Electronic", "music_electronic"),
+        ("Dance", "music_dance"),
+        ("Jazz", "music_jazz"),
+        ("Blues", "music_blues"),
+        ("Classical", "music_classical"),
+        ("Folk", "music_folk"),
+        ("Country", "music_country"),
+        ("Indie", "music_indie"),
+        ("Metal", "music_metal"),
+        ("Reggae", "music_reggae"),
+        ("Soul", "music_soul"),
+        ("Gospel", "music_gospel"),
+        ("Instrumental", "music_instrumental"),
+        ("Chill / Ambient", "music_chill"),
+        ("Party", "music_party"),
+        ("Workout", "music_workout"),
+        ("Sleep / Meditation", "music_sleep"),
+        ("Kids", "music_kids"),
+        ("Soundtracks", "music_ost"),
+        ("90s Hits", "music_90s"),
+        ("2000s Hits", "music_2000s"),
+        ("Latest Hits", "music_latest"),
+        ("Telugu Songs", "music_telugu"),
+        ("Malayalam Songs", "music_malayalam"),
+        ("Kannada Songs", "music_kannada"),
+        ("Bengali Songs", "music_bengali"),
+        ("Punjabi Songs", "music_punjabi"),
+        ("Marathi Songs", "music_marathi"),
+        ("Korean / K-Pop", "music_korean"),
+        ("Japanese", "music_japanese"),
+        ("Arabic", "music_arabic"),
+        ("Spanish", "music_spanish"),
+    ]),
+    ("AUDIOBOOKS", [
+        ("Tamil Stories 1000+", "ab_tamil"),
+        ("Ponniyin Selvan", "ab_ponniyin"),
+        ("Thirukkural", "ab_thirukkural"),
+        ("Fiction", "ab_fiction"),
+        ("Non-Fiction", "ab_nonfic"),
+        ("Mystery", "ab_mystery"),
+        ("Thriller", "ab_thriller"),
+        ("Crime", "ab_crime"),
+        ("Horror", "ab_horror"),
+        ("Romance", "ab_romance"),
+        ("Fantasy", "ab_fantasy"),
+        ("Sci-Fi", "ab_scifi"),
+        ("Adventure", "ab_adventure"),
+        ("Biography", "ab_bio"),
+        ("Self-Help", "ab_self"),
+        ("Motivation", "ab_mot"),
+        ("Psychology", "ab_psych"),
+        ("Business", "ab_business"),
+        ("History", "ab_history"),
+        ("Science", "ab_science"),
+        ("Religion / Spiritual", "ab_spirit"),
+        ("Health & Wellness", "ab_health"),
+        ("Kids Collection", "ab_kids"),
+        ("Classics", "ab_classics"),
+        ("Short Stories", "ab_short"),
+        ("Sleep Stories", "ab_sleep"),
+        ("Best Sellers", "ab_bestsellers"),
+        ("New Releases", "ab_new"),
+        ("Trending", "ab_trending"),
+        ("Hindi Audiobooks", "ab_hindi"),
+        ("English Audiobooks", "ab_english"),
+        ("Telugu Audiobooks", "ab_telugu"),
+        ("Malayalam Audiobooks", "ab_malayalam"),
+    ]),
+    ("PODCASTS", [
+        ("Tamil Podcasts 1000+", "pod_tamil"),
+        ("Trending Podcasts", "pod_trending"),
+        ("Technology", "pod_tech"),
+        ("Motivation", "pod_mot"),
+        ("Comedy", "pod_comedy"),
+        ("Education", "pod_edu"),
+        ("Business", "pod_business"),
+        ("News & Politics", "pod_news"),
+        ("Health", "pod_health"),
+        ("True Crime", "pod_crime"),
+        ("Storytelling", "pod_story"),
+        ("Sports", "pod_sports"),
+        ("MindSpark", "pod_mindspark"),
+        ("Conversational", "pod_chat"),
+        ("Inspiring", "pod_inspire"),
+        ("Hindi Podcasts", "pod_hindi"),
+        ("English Podcasts", "pod_english"),
+        ("Telugu Podcasts", "pod_telugu"),
+    ]),
+    ("AV-PLAYER", [
+        ("Open File…", "av_open"),
+        ("Downloads (All)", "local_downloads"),
+        ("Local Video", "local_video"),
+        ("Local Audio", "local_audio"),
+        ("Music Folder", "local_music_folder"),
+        ("Videos Folder", "local_videos_folder"),
+    ]),
+    ("SYSTEM", [
+        ("Settings", "settings"),
+        ("AI Chat", "ai"),
+        ("Weather", "weather"),
+    ]),
+]
+
+def safe_winfo_children(w):
+    try:
+        return w.winfo_children() if w else []
+    except tk.TclError:
+        return []
+
+def safe_destroy(w):
+    try:
+        if w:
+            w.destroy()
+    except tk.TclError:
+        pass
+
+def safe_exists(w):
+    try:
+        return w is not None and bool(w.winfo_exists())
+    except tk.TclError:
+        return False
+
+
+class App(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("ProwinKepler v14 — Nested Menus · Advanced Player · 2000+ Channels")
+        self.geometry("1680x1060")
+        self.minsize(1280, 820)
+        self.configure(fg_color=C["bg"])
+
+        self.lat, self.lon = DEFAULT_LAT, DEFAULT_LON
+        self.current_media_items = []
+        self.current_media_index = -1
+        self.ai_api_key = ctk.StringVar(value="")
+        self.youtube_api_key = ctk.StringVar(value="")
+        self._vlc_ready = False
+        self.vlc_player = self.vlc_instance = None
+        self._expanded = {
+            "HOME": True, "LIVE TV": True, "YOUTUBE": True,
+            "PODCASTS": True, "FM RADIO": True, "MOVIES": True,
+            "AV-PLAYER": True, "MUSIC": True, "AUDIOBOOKS": True,
+        }
+        self._pending_afters = []
+        self._nav_id = 0
+        self._player_height = 430
+        self._size_mode = "M"
+        self._muted = False
+        self._playing = False
+        self._loop = False
+        self._speed = 1.0
+        self._cc_on = False
+        self._cache = {}
+        self._auto_next = False
+        self._current_play_url = ""
+        self._current_play_title = ""
+        self._current_play_mtype = ""
+        self._is_live_tv = False
+        self._download_dir = os.path.join(os.path.expanduser("~"), "ProwinKepler_Downloads")
+        os.makedirs(self._download_dir, exist_ok=True)
+
+        home = os.path.expanduser("~")
+        self._local_folders = {
+            "downloads": [self._download_dir],
+            "music": [
+                os.path.join(home, "Music"),
+                os.path.join(home, "Musik"),
+                os.path.join(home, "Documents", "Music"),
+            ],
+            "videos": [
+                os.path.join(home, "Videos"),
+                os.path.join(home, "Movies"),
+                os.path.join(home, "Documents", "Videos"),
+            ],
+        }
+
+        self._build()
+        self.after(600, self._init_vlc)
+        self._show_banner()
+        self.after(2800, lambda: self._navigate("home"))
+        self.after(3000, lambda: self._logo("ProwinKepler", "Neon Aurora · Nested Menus"))
+
+    def _show_banner(self):
+        try:
+            self._banner = ctk.CTkFrame(self, fg_color="#030b0f", corner_radius=0)
+            self._banner.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._banner_cv = tk.Canvas(self._banner, bg="#030b0f", highlightthickness=0)
+            self._banner_cv.pack(fill="both", expand=True)
+            self.update_idletasks()
+            w = max(self.winfo_width(), 900)
+            h = max(self.winfo_height(), 600)
+            self._banner_cv.create_rectangle(0, 0, w, h, fill="#030b0f", outline="")
+            self._banner_cv.create_oval(w*0.05, h*0.15, w*0.55, h*0.95, fill="#0a2830", outline="")
+            self._banner_cv.create_oval(w*0.4, h*0.0, w*0.98, h*0.7, fill="#061820", outline="")
+            for _ in range(220):
+                x, y = random.randint(0, w), random.randint(0, h)
+                s = random.choice([1, 1, 1, 2, 3])
+                col = random.choice(["#ffffff", "#a8fff0", "#ffb8e0", "#c8f0ff"])
+                self._banner_cv.create_oval(x, y, x+s, y+s, fill=col, outline="")
+            cx, cy = w//2, h//2 - 20
+            self._banner_cv.create_oval(cx-120, cy-100, cx+120, cy+110, outline=C["accent"], width=2)
+            self._banner_cv.create_oval(cx-100, cy-84, cx+100, cy+94, fill="#041418", outline="#1a5a6e", width=1)
+            self._banner_cv.create_text(cx, cy-20, text="◈", font=("Segoe UI", 42), fill=C["accent"])
+            self._banner_cv.create_text(cx, cy+40, text="ProwinKepler", font=("Segoe UI", 34, "bold"), fill="#e8fbff")
+            self._banner_cv.create_text(cx, cy+78, text="LIVE · LIBRARY · NEON AURORA", font=("Segoe UI", 13), fill=C["accent2"])
+            self._banner_cv.create_text(cx, h-40, text="Loading your universe…", font=("Segoe UI", 12), fill="#6a9aaa")
+            self._banner_stars = True
+            self._animate_banner(0)
+            self.after(2600, self._hide_banner)
+        except Exception as e:
+            print(f"[Banner] {e}")
+            try:
+                self._hide_banner()
+            except Exception:
+                pass
+
+    def _animate_banner(self, step):
+        if not getattr(self, "_banner_stars", False):
+            return
+        try:
+            if not safe_exists(self._banner_cv):
+                return
+            w = max(self._banner_cv.winfo_width(), 400)
+            h = max(self._banner_cv.winfo_height(), 300)
+            for _ in range(8):
+                x, y = random.randint(0, w), random.randint(0, h)
+                s = random.choice([1, 2, 3])
+                self._banner_cv.create_oval(x, y, x+s, y+s, fill="#ffffff", outline="")
+            self.after(120, lambda: self._animate_banner(step + 1))
+        except Exception:
+            pass
+
+    def _hide_banner(self):
+        self._banner_stars = False
+        try:
+            if getattr(self, "_banner", None):
+                self._banner.place_forget()
+                self._banner.destroy()
+                self._banner = None
+        except Exception:
+            pass
+
+    def _build(self):
+        # ========== TOP HEADER (glass bar) ==========
+        hdr = ctk.CTkFrame(self, height=62, fg_color=C["header"], corner_radius=0,
+                           border_width=0)
+        hdr.pack(fill="x")
+        hdr.pack_propagate(False)
+
+        # Brand block
+        brand = ctk.CTkFrame(hdr, fg_color="transparent")
+        brand.pack(side="left", padx=(14, 8))
+        ctk.CTkLabel(brand, text="◈  ProwinKepler", font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color=C["accent"]).pack(side="left")
+        ctk.CTkLabel(brand, text="  AURORA", font=ctk.CTkFont(size=10, weight="bold"),
+                     text_color=C["accent2"]).pack(side="left", pady=(4, 0))
+
+        sf = ctk.CTkFrame(hdr, fg_color="transparent")
+        sf.pack(side="left", expand=True, padx=8)
+        self.search = ctk.CTkEntry(
+            sf, width=440, height=36, placeholder_text="  🔍  Search TV · Movies · Music · Podcast…",
+            fg_color=C["card"], border_color=C["glass_border"], border_width=1,
+            corner_radius=18, text_color=C["fg"],
+        )
+        self.search.pack(side="left", padx=4)
+        self.search.bind("<Return>", lambda e: self._global_search())
+        ctk.CTkButton(
+            sf, text="Search", width=88, height=36, fg_color=C["accent"], text_color="#001018",
+            corner_radius=18, hover_color="#00d4b8", font=ctk.CTkFont(weight="bold", size=13),
+            command=self._global_search,
+        ).pack(side="left", padx=4)
+
+        # Right side controls — pill buttons
+        ctk.CTkButton(hdr, text="🔓 Quit", width=72, height=32, fg_color="#3a1020",
+                      hover_color="#6a1840", corner_radius=16, border_width=1,
+                      border_color="#6a2840", command=self._quit_app).pack(side="right", padx=8)
+        ctk.CTkButton(hdr, text="↻ Refresh", width=88, height=32, fg_color=C["card"],
+                      hover_color=C["card_hover"], corner_radius=16, border_width=1,
+                      border_color=C["glass_border"], command=self._refresh_view).pack(side="right", padx=3)
+        ctk.CTkButton(hdr, text="♪ Lyrics", width=88, height=32, fg_color=C["card2"],
+                      hover_color=C["card_hover"], corner_radius=16, border_width=1,
+                      border_color=C["glass_border"], command=self._toggle_lyrics).pack(side="right", padx=3)
+
+        self.play_ind = ctk.CTkLabel(hdr, text="● STOPPED", text_color=C["stop_btn"],
+                                     font=ctk.CTkFont(size=12, weight="bold"))
+        self.play_ind.pack(side="right", padx=(8, 10))
+        self.status = ctk.CTkLabel(hdr, text="● Online", text_color=C["success"],
+                                   font=ctk.CTkFont(size=12, weight="bold"))
+        self.status.pack(side="right", padx=6)
+
+        self.clock_lbl = ctk.CTkLabel(hdr, text="", font=ctk.CTkFont(size=12, weight="bold"),
+                                      text_color=C["muted"])
+        self.clock_lbl.pack(side="right", padx=(6, 10))
+        self._update_clock()
+        self._current_view = "home"
+
+        # Accent line under header
+        ctk.CTkFrame(self, height=2, fg_color=C["accent"], corner_radius=0).pack(fill="x")
+
+        # ========== BODY ==========
+        body = ctk.CTkFrame(self, fg_color=C["bg"])
+        body.pack(fill="both", expand=True)
+
+        # ----- LEFT ICON RAIL -----
+        self.icon_rail = ctk.CTkFrame(body, width=86, fg_color=C["sidebar"], corner_radius=0,
+                                      border_width=0)
+        self.icon_rail.pack(side="left", fill="y")
+        self.icon_rail.pack_propagate(False)
+
+        rail_top = ctk.CTkFrame(self.icon_rail, fg_color=C["card"], corner_radius=14)
+        rail_top.pack(fill="x", padx=8, pady=(12, 10))
+        ctk.CTkLabel(rail_top, text="◈", font=ctk.CTkFont(size=22), text_color=C["accent"]).pack(pady=(8, 0))
+        ctk.CTkLabel(rail_top, text="Prowin\nKepler", font=ctk.CTkFont(size=10, weight="bold"),
+                     text_color=C["fg"], justify="center").pack(pady=(0, 8))
+
+        self._rail_btns = {}
+        rail_items = [
+            ("🖥️", "tv_tamil", "TV"),
+            ("▶️", "mov_tamil", "Movies"),
+            ("🎙️", "pod_tamil", "Podcast"),
+            ("📖", "ab_tamil", "Audiobook"),
+            ("📁", "av_open", "AV-Player"),
+            ("🎵", "music_tamil", "Music"),
+            ("📻", "tamilfm", "FM"),
+            ("▶️", "yt_trending", "YouTube"),
+            ("🏠", "home", "Home"),
+            ("🔍", "search_focus", "Search"),
+        ]
+        for icon, view, tip in rail_items:
+            fr = ctk.CTkFrame(self.icon_rail, fg_color="transparent")
+            fr.pack(pady=2, padx=6, fill="x")
+            b = ctk.CTkButton(
+                fr, text=icon, width=64, height=40,
+                fg_color="transparent", hover_color=C["card_hover"],
+                text_color=C["accent"], font=ctk.CTkFont(size=18),
+                corner_radius=14,
+                command=lambda v=view: self._rail_click(v),
+            )
+            b.pack()
+            lbl = ctk.CTkLabel(fr, text=tip, font=ctk.CTkFont(size=9, weight="bold"),
+                               text_color=C["muted"])
+            lbl.pack()
+            self._rail_btns[view] = (b, lbl)
+
+        ctk.CTkFrame(self.icon_rail, fg_color="transparent", height=4).pack(expand=True, fill="y")
+        ctk.CTkButton(self.icon_rail, text="⚙", width=64, height=36, fg_color=C["card"],
+                      hover_color=C["card_hover"], text_color=C["muted"], font=ctk.CTkFont(size=16),
+                      corner_radius=12, command=lambda: self._navigate("settings")).pack(pady=3, padx=8)
+        ctk.CTkButton(self.icon_rail, text="👤", width=64, height=36, fg_color=C["card"],
+                      hover_color=C["card_hover"], text_color=C["muted"], font=ctk.CTkFont(size=16),
+                      corner_radius=12, command=lambda: self._navigate("settings")).pack(pady=(3, 12), padx=8)
+
+        # ----- DETAILED SIDEBAR -----
+        self.sidebar = ctk.CTkScrollableFrame(body, width=228, fg_color=C["sidebar"],
+                                              border_width=0, corner_radius=0)
+        self.sidebar.pack(side="left", fill="y")
+        self._build_sidebar()
+
+        # ----- MAIN AREA -----
+        main = ctk.CTkFrame(body, fg_color=C["bg"])
+        main.pack(side="left", fill="both", expand=True, padx=12, pady=8)
+
+        # Lyrics panel (right)
+        self._lyrics_visible = False
+        self.lyrics_panel = ctk.CTkFrame(body, width=270, fg_color=C["sidebar"], corner_radius=0)
+        self.lyrics_panel.pack_propagate(False)
+        lyr_hdr = ctk.CTkFrame(self.lyrics_panel, fg_color="transparent")
+        lyr_hdr.pack(fill="x", padx=6, pady=(10, 2))
+        ctk.CTkLabel(lyr_hdr, text="♪  Lyrics / Subtitles", font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=C["accent"]).pack(side="left")
+        ctk.CTkButton(lyr_hdr, text="✕", width=28, height=24, fg_color=C["card"],
+                      command=self._toggle_lyrics).pack(side="right")
+        ctk.CTkButton(self.lyrics_panel, text="↻ Refresh lyrics", height=28, fg_color=C["card2"],
+                      corner_radius=8, command=self._refresh_lyrics).pack(fill="x", padx=8, pady=4)
+        self.lyrics_box = ctk.CTkTextbox(self.lyrics_panel, fg_color=C["glass"], text_color=C["fg"],
+                                         corner_radius=10, border_width=1, border_color=C["glass_border"],
+                                         font=ctk.CTkFont(size=12), wrap="word")
+        self.lyrics_box.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        self.lyrics_box.insert("end", "Click ♪ Lyrics to open this panel.\nPlay a song or YouTube video for lyrics / subtitles.")
+        self.lyrics_box.configure(state="disabled")
+        self._last_lyrics_title = ""
+
+        # ========== PLAYER FRAME (glass card) ==========
+        self.player_frame = ctk.CTkFrame(
+            main, height=self._player_height + 96, fg_color=C["card"],
+            corner_radius=16, border_width=1, border_color=C["glass_border"],
+        )
+        self.player_frame.pack(fill="x", pady=(0, 8))
+        self.player_frame.pack_propagate(False)
+
+        self.video_panel = ctk.CTkFrame(self.player_frame, fg_color="#000000", corner_radius=12)
+        self.video_panel.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+
+        self.logo_canvas = tk.Canvas(self.video_panel, bg="#020c10", highlightthickness=0)
+        self.logo_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self.audio_viz = tk.Canvas(self.video_panel, bg="#061820", highlightthickness=0, width=360, height=170)
+        self._viz_bars = []
+        for i in range(24):
+            x = 20 + i * 14
+            bar = self.audio_viz.create_rectangle(x, 70, x+10, 110, fill=C["accent"], outline="")
+            self._viz_bars.append(bar)
+
+        # Progress row
+        prog_row = ctk.CTkFrame(self.player_frame, height=24, fg_color=C["glass"], corner_radius=8)
+        prog_row.pack(fill="x", padx=8, pady=(0, 4))
+        prog_row.pack_propagate(False)
+        self.time_lbl = ctk.CTkLabel(prog_row, text="00:00", font=ctk.CTkFont(size=10, weight="bold"),
+                                     text_color=C["muted"], width=48)
+        self.time_lbl.pack(side="left", padx=(6, 2))
+        self.progress = ctk.CTkSlider(
+            prog_row, from_=0, to=1000, width=400,
+            progress_color=C["accent"], button_color=C["accent2"],
+            button_hover_color="#ff5aad", command=self._on_seek,
+        )
+        self.progress.set(0)
+        self.progress.pack(side="left", fill="x", expand=True, padx=4)
+        self.dur_lbl = ctk.CTkLabel(prog_row, text="00:00", font=ctk.CTkFont(size=10, weight="bold"),
+                                    text_color=C["muted"], width=48)
+        self.dur_lbl.pack(side="right", padx=(2, 6))
+        self._seek_dragging = False
+        self._progress_job = None
+
+        # ========== CONTROL BAR ==========
+        ctrl = ctk.CTkFrame(self.player_frame, height=62, fg_color=C["glass"], corner_radius=10)
+        ctrl.pack(fill="x", side="bottom", padx=6, pady=(0, 6))
+        ctrl.pack_propagate(False)
+
+        info_fr = ctk.CTkFrame(ctrl, fg_color="transparent", width=230)
+        info_fr.pack(side="left", padx=10)
+        info_fr.pack_propagate(False)
+        self.now_title = ctk.CTkLabel(info_fr, text="Nothing playing", font=ctk.CTkFont(size=13, weight="bold"),
+                                      text_color=C["fg"], anchor="w")
+        self.now_title.pack(fill="x")
+        self.now_sub = ctk.CTkLabel(info_fr, text="Select media below", font=ctk.CTkFont(size=10),
+                                    text_color=C["muted"], anchor="w")
+        self.now_sub.pack(fill="x")
+
+        def _pill(parent, text, cmd, w=34, bg=None, tc=None):
+            return ctk.CTkButton(
+                parent, text=text, width=w, height=30,
+                fg_color=bg or C["card"], text_color=tc or C["fg"],
+                hover_color=C["card_hover"], corner_radius=15,
+                border_width=1, border_color=C["glass_border"],
+                font=ctk.CTkFont(size=12, weight="bold"), command=cmd,
+            )
+
+        _pill(ctrl, "⏮", self._prev).pack(side="left", padx=1)
+        ctk.CTkButton(ctrl, text="▶", width=40, height=32, fg_color=C["play_btn"], text_color="#001018",
+                      hover_color="#00d4b8", corner_radius=16, font=ctk.CTkFont(size=14, weight="bold"),
+                      command=self._play_btn).pack(side="left", padx=2)
+        _pill(ctrl, "⏸", self._pause).pack(side="left", padx=1)
+        _pill(ctrl, "🛑", self._stop, bg="#2a1018", tc=C["stop_btn"]).pack(side="left", padx=1)
+        _pill(ctrl, "⏭", self._next).pack(side="left", padx=1)
+
+        _pill(ctrl, "⏪10m", lambda: self._seek(-600), w=52, bg=C["card2"]).pack(side="left", padx=2)
+        _pill(ctrl, "10m⏩", lambda: self._seek(600), w=52, bg=C["card2"]).pack(side="left", padx=2)
+
+        self.loop_btn = _pill(ctrl, "➿", self._toggle_loop)
+        self.loop_btn.pack(side="left", padx=2)
+        self.cc_btn = _pill(ctrl, "CC", self._toggle_cc)
+        self.cc_btn.pack(side="left", padx=2)
+
+        ctk.CTkButton(ctrl, text="⬇ DL", width=50, height=30, fg_color=C["accent2"],
+                      text_color="#fff", corner_radius=15, hover_color="#e02080",
+                      font=ctk.CTkFont(size=11, weight="bold"),
+                      command=self._download_current).pack(side="left", padx=3)
+        _pill(ctrl, "⚙", self._open_player_settings).pack(side="left", padx=2)
+
+        self.live_lbl = ctk.CTkLabel(ctrl, text="", font=ctk.CTkFont(size=11, weight="bold"),
+                                     text_color=C["stop_btn"], width=70)
+        self.live_lbl.pack(side="left", padx=4)
+
+        # Size pills
+        size_f = ctk.CTkFrame(ctrl, fg_color="transparent")
+        size_f.pack(side="right", padx=4)
+        for label, mode in [("S", "S"), ("M", "M"), ("L", "L"), ("XL", "XL")]:
+            ctk.CTkButton(
+                size_f, text=label, width=30, height=28, fg_color=C["card2"],
+                hover_color=C["card_hover"], corner_radius=14,
+                border_width=1, border_color=C["glass_border"],
+                font=ctk.CTkFont(size=10, weight="bold"),
+                command=lambda m=mode: self._set_player_size(m),
+            ).pack(side="left", padx=1)
+        ctk.CTkButton(
+            size_f, text="⛶", width=30, height=28, fg_color=C["card"],
+            hover_color=C["card_hover"], corner_radius=14,
+            border_width=1, border_color=C["glass_border"],
+            command=self._toggle_fullscreen,
+        ).pack(side="left", padx=2)
+
+        # Volume
+        self.vol = ctk.CTkSlider(
+            ctrl, from_=0, to=100, width=86, command=self._vol,
+            progress_color=C["accent"], button_color=C["accent2"],
+        )
+        self.vol.set(70)
+        self.vol.pack(side="right", padx=4)
+        ctk.CTkButton(
+            ctrl, text="🔕", width=32, height=28, fg_color=C["card"],
+            hover_color=C["card_hover"], corner_radius=14,
+            border_width=1, border_color=C["glass_border"],
+            command=self._toggle_mute,
+        ).pack(side="right", padx=2)
+        ctk.CTkLabel(ctrl, text="🔉", font=ctk.CTkFont(size=13), text_color=C["accent"]).pack(side="right")
+
+        # Content scroll area
+        self.scroll = ctk.CTkScrollableFrame(main, fg_color=C["bg"])
+        self.scroll.pack(fill="both", expand=True)
+
+    def _build_sidebar(self):
+        for w in safe_winfo_children(self.sidebar):
+            safe_destroy(w)
+        for section, items in MENU:
+            exp = self._expanded.get(section, False)
+            sec = ctk.CTkFrame(self.sidebar, fg_color=C["card"] if exp else "transparent",
+                               corner_radius=10)
+            sec.pack(fill="x", padx=6, pady=(6, 2))
+            ctk.CTkButton(
+                sec, text=f"{'▼' if exp else '▶'}  {section}",
+                fg_color="transparent", hover_color=C["card_hover"],
+                text_color=C["accent"], font=ctk.CTkFont(size=12, weight="bold"),
+                anchor="w", height=30, corner_radius=8,
+                command=lambda s=section: self._toggle_section(s),
+            ).pack(fill="x", padx=2, pady=2)
+            if exp:
+                for label, view in items:
+                    ctk.CTkButton(
+                        sec, text=f"   · {label}", height=28,
+                        fg_color="transparent", hover_color=C["rail_active"],
+                        text_color=C["fg"], font=ctk.CTkFont(size=11),
+                        anchor="w", corner_radius=6,
+                        command=lambda v=view: self._navigate(v),
+                    ).pack(fill="x", padx=4, pady=1)
+
+    def _toggle_section(self, section):
+        self._expanded[section] = not self._expanded.get(section, False)
+        self._build_sidebar()
+
+    def _rail_click(self, view):
+        # Active pill glow on rail
+        for v, (btn, lbl) in self._rail_btns.items():
+            try:
+                if v == view:
+                    btn.configure(fg_color=C["rail_active"], text_color=C["glow"],
+                                  border_width=1, border_color=C["accent"])
+                    lbl.configure(text_color=C["glow"])
+                else:
+                    btn.configure(fg_color="transparent", text_color=C["accent"],
+                                  border_width=0)
+                    lbl.configure(text_color=C["muted"])
+            except Exception:
+                pass
+        if view == "search_focus":
+            self.search.focus_set()
+        else:
+            self._navigate(view)
+
+    def _update_clock(self):
+        try:
+            now = datetime.datetime.now()
+            self.clock_lbl.configure(text=now.strftime("%d %b %Y  ·  %H:%M:%S"))
+        except Exception:
+            pass
+        self.after(1000, self._update_clock)
+
+    def _safe_after(self, ms, func):
+        try:
+            id_ = self.after(ms, func)
+            self._pending_afters.append(id_)
+        except Exception:
+            pass
+
+    def _set_play_status(self, mode):
+        colors = {
+            "play": ("● PLAYING", C["success"]),
+            "going": ("● BUFFERING", C["warning"]),
+            "wait": ("● WAITING", C["muted"]),
+            "stop": ("● STOPPED", "#ff2244"),
+            "error": ("● ERROR", C["error"]),
+            "radio": ("● RADIO", C["accent2"]),
+            "yt": ("● YT", C["accent"]),
+            "hd": ("● HD", C["success"]),
+            "local": ("● LOCAL", C["accent2"]),
+        }
+        text, col = colors.get(mode, ("● STOPPED", "#ff2244"))
+        try:
+            self.play_ind.configure(text=text, text_color=col)
+        except Exception:
+            pass
+
+    def _navigate(self, view):
+        self._nav_id += 1
+        self._current_view = view
+        for w in safe_winfo_children(self.scroll):
+            safe_destroy(w)
+        self.current_media_items = []
+        self.current_media_index = -1
+
+        if view == "home":
+            self._view_home()
+        elif view.startswith("tv_"):
+            self._view_tv(view)
+        elif view.startswith("mov_"):
+            self._view_movies(view)
+        elif view.startswith("yt_"):
+            self._view_youtube(view)
+        elif view in ("tamilfm", "fm_local", "fm_all", "fm_trending", "fm_search") or view.startswith("fm_") or view in ("englishfm", "hindifm"):
+            self._view_fm(view)
+        elif view.startswith("music_"):
+            self._view_music(view)
+        elif view.startswith("ab_"):
+            self._view_audiobooks(view)
+        elif view.startswith("pod_"):
+            self._view_podcasts(view)
+        elif view.startswith("local_") or view == "av_open":
+            self._view_local(view)
+        elif view == "settings":
+            self._view_settings()
+        elif view == "ai":
+            self._view_ai()
+        elif view == "weather":
+            self._view_weather()
+        elif view in ("trending", "recommended"):
+            self._view_home()
+        else:
+            self._h(view)
+            ctk.CTkLabel(self.scroll, text="Coming soon / loading…", text_color=C["muted"]).pack(pady=20)
+
+    def _h(self, title):
+        ctk.CTkLabel(self.scroll, text=title, font=ctk.CTkFont(size=20, weight="bold"),
+                     text_color=C["accent"]).pack(anchor="w", pady=(4, 2))
+
+    def _sub(self, text):
+        ctk.CTkLabel(self.scroll, text=text, font=ctk.CTkFont(size=12),
+                     text_color=C["muted"]).pack(anchor="w", pady=(0, 8))
+
+    def _view_home(self):
+        self._h("Dashboard")
+        self._sub("Quick access · Nested menus · 2000+ channels · Advanced player on every section")
+        chips = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        chips.pack(fill="x", pady=6)
+        for label, view in [
+            ("Tamil TV", "tv_tamil"), ("Cartoon 200+", "tv_cartoon"),
+            ("News", "tv_news"), ("Sports", "tv_sports"),
+            ("Kids", "tv_kids"), ("Movies", "mov_tamil"),
+            ("Tamil FM", "tamilfm"), ("YouTube", "yt_trending"),
+            ("AV-Player", "av_open"), ("Podcast", "pod_tamil"),
+            ("Audiobook", "ab_tamil"), ("Music", "music_tamil"),
+        ]:
+            ctk.CTkButton(chips, text=label, width=110, height=32, fg_color=C["card"],
+                          hover_color=C["card_hover"], corner_radius=10,
+                          command=lambda v=view: self._navigate(v)).pack(side="left", padx=4, pady=4)
+        self._sub("Always-on free streams")
+        self._fill_list([(n, u, t, "") for n, u, t in FREE_LIVE], self.scroll)
+
+    def _view_tv(self, view):
+        """Show TV channel list in the scroll area BELOW the player (same window)."""
+        mapping = {
+            "tv_tamil": (["tamil", "sun", "vijay", "zee tamil", "colors tamil", "ktv", "polimer", "thanthi", "puthiya", "raj tv", "makkal"], "Tamil Channels"),
+            "tv_telugu": (["telugu", "gemini", "etv telugu", "zee telugu", "maa"], "Telugu Channels"),
+            "tv_hindi": (["hindi", "star plus", "zee tv", "colors", "sony", "sab", "aaj tak"], "Hindi Channels"),
+            "tv_english": (["english", "bbc", "cnn", "fox", "nbc", "abc", "cbs", "sky", "euronews"], "English Channels"),
+            "tv_malayalam": (["malayalam", "asianet", "surya", "mazhavil", "flowers"], "Malayalam Channels"),
+            "tv_kannada": (["kannada", "udaya", "zee kannada", "colors kannada", "suvarna"], "Kannada Channels"),
+            "tv_bengali": (["bengali", "star jalsha", "zee bangla", "colors bangla"], "Bengali Channels"),
+            "tv_marathi": (["marathi", "zee marathi", "colors marathi", "star pravah"], "Marathi Channels"),
+            "tv_gujarati": (["gujarati", "colors gujarati", "zee gujarati"], "Gujarati Channels"),
+            "tv_punjabi": (["punjabi", "ptc", "zee punjabi"], "Punjabi Channels"),
+            "tv_regional": (["regional", "odia", "assamese", "bhojpuri"], "Regional Channels"),
+            "tv_intl": (["international", "world", "global", "africa", "europe"], "International"),
+            "tv_news": (["news", "ndtv", "cnn", "bbc", "republic", "aaj tak", "times now", "al jazeera", "dw "], "News"),
+            "tv_sports": (["sport", "espn", "star sports", "sony six", "willow", "cricket", "football"], "Sports"),
+            "tv_ent": (["entertainment", "star", "zee", "colors", "sony"], "Entertainment"),
+            "tv_movies": (["movie", "cinema", "filmy", "movies", "bollywood"], "Movies TV"),
+            "tv_music": (["music", "mtv", "vh1", "9xm", "b4u"], "Music TV"),
+            "tv_kids": (["kids", "cartoon", "pogo", "disney", "nick", "chutti", "hungama", "baby"], "Kids"),
+            "tv_cartoon": (["cartoon", "animation", "anime", "toon", "pogo", "disney", "nick", "chutti"], "Cartoon"),
+            "tv_edu": (["education", "discovery", "national geographic", "history", "animal"], "Education"),
+            "tv_lifestyle": (["lifestyle", "fashion", "travel", "food", "home"], "Lifestyle"),
+            "tv_travel": (["travel", "voyage", "discovery travel"], "Travel"),
+            "tv_food": (["food", "cooking", "cuisine"], "Food"),
+            "tv_fashion": (["fashion", "style"], "Fashion"),
+            "tv_science": (["science", "discovery", "national geographic"], "Science"),
+            "tv_tech": (["tech", "technology", "gadget"], "Technology"),
+            "tv_business": (["business", "cnbc", "bloomberg", "et now"], "Business"),
+            "tv_docu": (["documentary", "docu", "discovery", "nat geo"], "Documentary"),
+            "tv_wildlife": (["wildlife", "animal", "nat geo wild", "earth"], "Wildlife"),
+            "tv_devo": (["devo", "bhakti", "spiritual", "god", "temple", "faith", "hope"], "Devotional"),
+            "tv_comedy": (["comedy", "laugh", "fun"], "Comedy"),
+            "tv_reality": (["reality", "bigg boss", "survivor", "talent"], "Reality TV"),
+            "tv_serials": (["serial", "drama", "soap"], "Serials / Drama"),
+            "tv_awards": (["award", "filmfare", "oscar"], "Awards Shows"),
+            "tv_events": (["live", "event", "concert", "match"], "Live Events"),
+            "tv_india": (["india", "indian", "tamil", "hindi", "telugu"], "All India"),
+            "tv_all": ([], "All Channels"),
+        }
+        keys, title = mapping.get(view, (["tv", "channel", "news"], view))
+        self._h(title)
+        self._sub(f"Channels appear below · Local M3U loaded: {len(ALL_TV)} · Same window (no popup)")
+
+        status = ctk.CTkLabel(self.scroll, text="Loading…", text_color=C["accent"])
+        status.pack(pady=8)
+        nav = self._nav_id
+
+        def build_items_fast():
+            """Local-only, no network — instant from tv.txt + curated lists."""
+            items = []
+            if view == "tv_all" or not keys:
+                items = list(ALL_TV[:400]) if ALL_TV else []
+            else:
+                items = list(_tv_filter(keys, limit=300))
+
+            seen = {x[0].lower() for x in items}
+
+            if view == "tv_tamil":
+                for t in reversed(TAMIL_TV):
+                    k = t[0].lower()
+                    if k not in seen:
+                        items.insert(0, (t[0], t[1], t[2], ""))
+                        seen.add(k)
+            elif view in ("tv_cartoon", "tv_kids"):
+                for t in reversed(CARTOON_TV):
+                    k = t[0].lower()
+                    if k not in seen:
+                        items.insert(0, (t[0], t[1], t[2], ""))
+                        seen.add(k)
+                for it in _tv_filter(
+                    ["cartoon", "anime", "toon", "kids", "nick", "disney", "pogo",
+                     "chutti", "baby", "barbie", "blippi"],
+                    limit=200,
+                ):
+                    k = it[0].lower()
+                    if k not in seen:
+                        items.append(it)
+                        seen.add(k)
+
+            if not items or view in ("tv_news", "tv_english", "tv_intl"):
+                for t in FREE_LIVE:
+                    k = t[0].lower()
+                    if k not in seen:
+                        items.append((t[0], t[1], t[2], ""))
+                        seen.add(k)
+
+            if len(items) < 20 and ALL_TV:
+                for ch in ALL_TV:
+                    k = ch[0].lower()
+                    if k not in seen:
+                        items.append(ch)
+                        seen.add(k)
+                    if len(items) >= 200:
+                        break
+
+            return items[:300]  # UI cap — fast render
+
+        def finish(items):
+            if nav != self._nav_id:
+                return
+            if safe_exists(status):
+                safe_destroy(status)
+            self._fill_list(items, self.scroll, nav, compact=True)
+
+        # Always use local data first (instant). No IPTV on critical path.
+        try:
+            items = build_items_fast()
+            finish(items)
+        except Exception as e:
+            print(f"[TV] {e}")
+            if safe_exists(status):
+                safe_destroy(status)
+            self._fill_list(
+                [(n, u, t, "") for n, u, t in FREE_LIVE],
+                self.scroll, nav, compact=True,
+            )
+
+    def _view_movies(self, view):
+        key = view.replace("mov_", "").replace("_", " ").strip() or "tamil movies"
+        self._h("Movies · " + key.title())
+        self._sub("YouTube + local M3U · Advanced player · Download available")
+        self._media_search_ui(key + " movie trailer OR full movie", "movie", "🎬", media="video")
+
+    def _view_youtube(self, view):
+        key = view.replace("yt_", "").replace("_", " ").strip() or "trending"
+        self._h("YouTube · " + key.title())
+        self._sub("Fetched via yt-dlp · Auto-next · Download · Advanced player")
+        self._media_search_ui(key, "youtube", "▶", media="video")
+
+    def _view_fm(self, view):
+        """Show FM stations in the scroll area BELOW the player (same window)."""
+        key = view.replace("fm_", "").replace("_", " ").strip() or "tamil fm"
+        if view == "tamilfm":
+            key = "tamil radio fm"
+        self._h("FM Radio · " + key.title())
+        self._sub(f"Stations appear below · ON AIR · Local list: {len(ALL_TV)}")
+
+        nav = self._nav_id
+        # Instant local FM list — no network
+        items = []
+        seen = set()
+        for t in TAMIL_FM:
+            items.append((t[0], t[1], "audio", ""))
+            seen.add(t[0].lower())
+        for it in _tv_filter(
+            ["fm", "radio", "suryan", "mirchi", "hello", "big fm", key],
+            limit=200,
+        ):
+            k = it[0].lower()
+            if k not in seen:
+                items.append((it[0], it[1], "audio", it[3] if len(it) > 3 else ""))
+                seen.add(k)
+        if not items:
+            items = [(t[0], t[1], "audio", "") for t in FREE_LIVE]
+        self._fill_list(items[:250], self.scroll, nav, compact=True)
+
+    def _view_music(self, view):
+        key = view.replace("music_", "").replace("_", " ").strip() or "tamil hits"
+        self._h("Music · " + key.title())
+        self._sub("iTunes + YouTube Music · auto-next · lyrics · Download MP3")
+        self._media_search_ui(key, "music", "🎵", media="music")
+
+    def _view_audiobooks(self, view):
+        key = view.replace("ab_", "").replace("_", " ").strip() or "tamil audiobook"
+        self._h("Audiobooks · " + key.title())
+        self._sub("iTunes + YouTube · Download MP3 · Advanced player")
+        self._media_search_ui(key, "audiobook", "📖", media="audiobook")
+
+    def _view_podcasts(self, view):
+        key = view.replace("pod_", "").replace("_", " ").strip() or "tamil podcast"
+        self._h("Podcasts · " + key.title())
+        self._sub("iTunes + YouTube · Download MP3 · Advanced player")
+        self._media_search_ui(key, "podcast", "🎙️", media="podcast")
+
+    def _media_search_ui(self, key, label, icon, media="podcast"):
+        bar = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        bar.pack(fill="x", pady=6)
+        entry = ctk.CTkEntry(bar, width=360, height=36, placeholder_text=f"Search {label}…",
+                             fg_color=C["card"], border_color=C["glass_border"], corner_radius=12)
+        entry.pack(side="left", padx=(0, 8))
+        results = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        results.pack(fill="both", expand=True)
+        nav = self._nav_id
+
+        def do(q=None):
+            q = (q or entry.get().strip() or key).strip()
+            for w in safe_winfo_children(results):
+                safe_destroy(w)
+            # Instant local matches first (no wait)
+            local_hits = _tv_filter([q, label], limit=40)
+            if local_hits:
+                self._fill_list(local_hits, results, nav, compact=True)
+            else:
+                ctk.CTkLabel(results, text=f"Searching {label}…", text_color=C["accent"]).pack(pady=10)
+
+            def worker():
+                items = list(local_hits)
+                seen = {x[0].lower() for x in items}
+                # 1) iTunes — short timeout, fewer results
+                try:
+                    if media in ("podcast", "audiobook", "music"):
+                        entity = "podcast" if media == "podcast" else ("audiobook" if media == "audiobook" else "song")
+                        media_type = "podcast" if media == "podcast" else ("audiobook" if media == "audiobook" else "music")
+                        it_url = (
+                            f"https://itunes.apple.com/search?term={requests.utils.quote(q)}"
+                            f"&media={media_type}&entity={entity}&limit=20"
+                        )
+                        data = requests.get(
+                            it_url, timeout=5,
+                            headers={"User-Agent": "ProwinKepler/14"},
+                        ).json()
+                        for r in data.get("results") or []:
+                            name = r.get("collectionName") or r.get("trackName") or r.get("artistName") or "Item"
+                            artist = r.get("artistName") or ""
+                            preview = r.get("previewUrl") or r.get("feedUrl") or r.get("episodeUrl")
+                            title = f"{icon} {name} — {artist}"[:80]
+                            if title.lower() in seen:
+                                continue
+                            if preview:
+                                items.append((title, preview, "audio", ""))
+                                seen.add(title.lower())
+                            elif r.get("collectionViewUrl"):
+                                items.append((title, r["collectionViewUrl"], "link", ""))
+                                seen.add(title.lower())
+                except Exception as e:
+                    print(f"[iTunes {media}] {e}")
+
+                # 2) YouTube — smaller search (fast)
+                if YTDLP_AVAILABLE and len(items) < 25:
+                    try:
+                        yopts = {
+                            "quiet": True, "no_warnings": True,
+                            "extract_flat": True, "default_search": "ytsearch8",
+                            "socket_timeout": 8,
+                        }
+                        with yt_dlp.YoutubeDL(yopts) as ydl:
+                            info = ydl.extract_info(f"ytsearch8:{q} {label}", download=False)
+                            for e in (info.get("entries") or []):
+                                title = e.get("title") or label
+                                url = e.get("url") or e.get("webpage_url") or f"https://www.youtube.com/watch?v={e.get('id')}"
+                                t = f"▶ {title[:70]}"
+                                if t.lower() not in seen:
+                                    items.append((t, url, "video", ""))
+                                    seen.add(t.lower())
+                    except Exception as e:
+                        print(f"[YT {media}] {e}")
+
+                if not items:
+                    items = [(f"No {label} found — try another search", "", "link", "")]
+
+                def upd():
+                    if nav != self._nav_id:
+                        return
+                    for w in safe_winfo_children(results):
+                        safe_destroy(w)
+                    self._fill_list(items[:200], results, nav, compact=(media != "video"))
+                self._safe_after(0, upd)
+            threading.Thread(target=worker, daemon=True).start()
+
+        entry.bind("<Return>", lambda e: do())
+        ctk.CTkButton(bar, text="Search", width=90, height=36, fg_color=C["accent"], text_color="#000",
+                      corner_radius=12, font=ctk.CTkFont(weight="bold"), command=lambda: do()).pack(side="left", padx=2)
+        ctk.CTkButton(bar, text="iTunes", width=80, height=36, fg_color=C["card2"],
+                      corner_radius=12, command=lambda: do(entry.get().strip() or key)).pack(side="left", padx=2)
+        do(key)
+
+    def _view_local(self, view):
+        if view == "av_open":
+            self._h("AV-Player · Open File")
+            self._sub("Choose a local video or audio file → plays in the advanced player")
+            bar = ctk.CTkFrame(self.scroll, fg_color="transparent")
+            bar.pack(fill="x", pady=10)
+            path_var = ctk.StringVar()
+            entry = ctk.CTkEntry(bar, width=480, height=36, textvariable=path_var,
+                                 placeholder_text="File path or click Browse…",
+                                 fg_color=C["card"], border_color=C["glass_border"], corner_radius=12)
+            entry.pack(side="left", padx=(0, 8))
+
+            def browse():
+                f = filedialog.askopenfilename(
+                    title="Select media file",
+                    filetypes=[
+                        ("Media", "*.mp4 *.mkv *.avi *.webm *.mov *.mp3 *.m4a *.aac *.flac *.wav *.ogg"),
+                        ("All files", "*.*"),
+                    ]
+                )
+                if f:
+                    path_var.set(f)
+
+            def play_file():
+                p = path_var.get().strip()
+                if not p or not os.path.isfile(p):
+                    messagebox.showwarning("AV-Player", "Please select a valid file.")
+                    return
+                title = os.path.splitext(os.path.basename(p))[0]
+                ext = os.path.splitext(p)[1].lower()
+                mtype = "video" if ext in VIDEO_EXTS else "audio"
+                self._play(title, p, mtype)
+
+            ctk.CTkButton(bar, text="Browse…", width=90, height=36, fg_color=C["card2"],
+                          corner_radius=12, command=browse).pack(side="left", padx=2)
+            ctk.CTkButton(bar, text="▶ Play", width=90, height=36, fg_color=C["accent"], text_color="#000",
+                          corner_radius=12, font=ctk.CTkFont(weight="bold"), command=play_file).pack(side="left", padx=4)
+            return
+
+        titles = {
+            "local_downloads": ("Downloads (All)", "all", self._local_folders["downloads"]),
+            "local_video": ("Local Video", "video", self._local_folders["downloads"] + self._local_folders["videos"]),
+            "local_audio": ("Local Audio", "audio", self._local_folders["downloads"] + self._local_folders["music"]),
+            "local_music_folder": ("Music Folder", "audio", self._local_folders["music"]),
+            "local_videos_folder": ("Videos Folder", "video", self._local_folders["videos"]),
+        }
+        title, want, folders = titles.get(view, ("Local Files", "all", self._local_folders["downloads"]))
+        self._h("AV-Player · " + title)
+        self._sub(f"Local files play in the same advanced player · Folder(s): {', '.join(folders[:2])}…")
+
+        loading = ctk.CTkLabel(self.scroll, text="Scanning local files…", text_color=C["accent"])
+        loading.pack(pady=16)
+        nav = self._nav_id
+
+        def worker():
+            items = _scan_local_media(folders, want=want, limit=500)
+            def finish():
+                if nav != self._nav_id:
+                    return
+                if safe_exists(loading):
+                    safe_destroy(loading)
+                if not items:
+                    empty = ctk.CTkFrame(self.scroll, fg_color=C["glass"], corner_radius=14,
+                                         border_width=1, border_color=C["glass_border"])
+                    empty.pack(pady=20, padx=30, fill="x")
+                    ctk.CTkLabel(empty, text="No media files found",
+                                 font=ctk.CTkFont(size=14, weight="bold"), text_color=C["accent"]).pack(pady=(16, 4))
+                    ctk.CTkLabel(empty, text=f"Put .mp3 / .mp4 files in:\n{self._download_dir}",
+                                 font=ctk.CTkFont(size=11), text_color=C["muted"]).pack(pady=(0, 16))
+                    return
+                self._fill_list(items, self.scroll, nav)
+            self._safe_after(0, finish)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _toggle_lyrics(self):
+        try:
+            if self._lyrics_visible:
+                self.lyrics_panel.pack_forget()
+                self._lyrics_visible = False
+            else:
+                self.lyrics_panel.pack(side="right", fill="y")
+                self._lyrics_visible = True
+                if self._last_lyrics_title:
+                    self._show_lyrics(self._last_lyrics_title)
+        except Exception as e:
+            print(f"[lyrics toggle] {e}")
+
+    def _refresh_lyrics(self):
+        if self._last_lyrics_title:
+            self._show_lyrics(self._last_lyrics_title)
+
+    def _refresh_view(self):
+        v = getattr(self, "_current_view", "home")
+        # On any TV-related view, re-download IPTV into tv.txt
+        if str(v).startswith("tv_") or v in ("home", "trending", "recommended"):
+            self.now_sub.configure(text="Refreshing IPTV → tv.txt…")
+            def worker():
+                n = refresh_iptv_to_file()
+                def done():
+                    self.now_sub.configure(text=f"IPTV refreshed: {n} channels saved to tv.txt")
+                    self._navigate(v)
+                self._safe_after(0, done)
+            threading.Thread(target=worker, daemon=True).start()
+            return
+        self._navigate(v)
+
+    def _quit_app(self):
+        try:
+            self._stop()
+            if self.vlc_player:
+                self.vlc_player.stop()
+            self.destroy()
+        except Exception:
+            sys.exit(0)
+
+    def _view_settings(self):
+        self._h("Settings")
+        box = ctk.CTkFrame(self.scroll, fg_color=C["glass"], corner_radius=14, border_width=1, border_color=C["glass_border"])
+        box.pack(fill="x", pady=8)
+        msg = (
+            f"ProwinKepler v14 — Nested Menus + Advanced Player\n\n"
+            f"• Icon rail: TV (🖥️) · Movies (▶️) · Podcast (🎙️) · Audiobook (📖) · AV-Player (📁)\n"
+            f"• Unified controls: ▶ ⏸ 🛑 ➿ CC 🔉 🔕 S/M/L/XL ⏪10m ⏩10m 📹 Speed\n"
+            f"• ON AIR live label only for TV + FM\n"
+            f"• Local tv.txt loaded: {len(ALL_TV)} unique channels\n"
+            f"• Every category targets 1000–2000 items\n"
+            f"• Download (⬇ DL): YouTube / Music / Podcast / Audiobook\n"
+            f"• Downloads folder: {self._download_dir}\n\n"
+            f"Player: {'OK' if VLC_AVAILABLE else 'Install VLC 64-bit from videolan.org'}\n"
+            f"yt-dlp: {'Ready ✓' if YTDLP_AVAILABLE else 'pip install -U yt-dlp'}\n"
+            f"pygame: {'Ready ✓' if PYGAME_AVAILABLE else 'Missing'}"
+        )
+        ctk.CTkLabel(box, text=msg, text_color=C["fg"], justify="left", font=ctk.CTkFont(size=13)).pack(padx=18, pady=18, anchor="w")
+
+    def _view_ai(self):
+        self._h("AI Chat")
+        ctk.CTkEntry(self.scroll, textvariable=self.ai_api_key, width=320, height=32, show="*",
+                     placeholder_text="OpenAI API key", fg_color=C["card"], corner_radius=10).pack(anchor="w", pady=4)
+        self.chat = ctk.CTkTextbox(self.scroll, height=260, fg_color=C["card"], text_color=C["fg"],
+                                   corner_radius=12, border_width=1, border_color=C["glass_border"])
+        self.chat.pack(fill="both", expand=True, pady=6)
+        self.chat.configure(state="disabled")
+        row = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        row.pack(fill="x")
+        self.ai_inp = ctk.CTkEntry(row, height=34, placeholder_text="Message…", fg_color=C["card"], corner_radius=10)
+        self.ai_inp.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(row, text="Send", width=70, height=34, fg_color=C["accent"], text_color="#000",
+                      corner_radius=10, font=ctk.CTkFont(weight="bold"), command=self._send_ai).pack(side="left")
+
+    def _send_ai(self):
+        text = self.ai_inp.get().strip()
+        if not text or not safe_exists(self.chat):
+            return
+        self.ai_inp.delete(0, "end")
+        self.chat.configure(state="normal")
+        self.chat.insert("end", f"You: {text}\n")
+        self.chat.configure(state="disabled")
+        key = self.ai_api_key.get().strip()
+        if not key:
+            self.chat.configure(state="normal")
+            self.chat.insert("end", "AI: Enter API key\n\n")
+            self.chat.configure(state="disabled")
+            return
+        def worker():
+            try:
+                r = requests.post("https://api.openai.com/v1/chat/completions",
+                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                                  json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": text}]}, timeout=25)
+                reply = r.json()["choices"][0]["message"]["content"]
+                def upd():
+                    if safe_exists(self.chat):
+                        self.chat.configure(state="normal")
+                        self.chat.insert("end", f"AI: {reply}\n\n")
+                        self.chat.configure(state="disabled")
+                self._safe_after(0, upd)
+            except Exception as e:
+                def err():
+                    if safe_exists(self.chat):
+                        self.chat.configure(state="normal")
+                        self.chat.insert("end", f"AI: {e}\n\n")
+                        self.chat.configure(state="disabled")
+                self._safe_after(0, err)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _view_weather(self):
+        self._h("Weather")
+        lbl = ctk.CTkLabel(self.scroll, text="Fetching…", text_color=C["fg"], font=ctk.CTkFont(family="Consolas", size=13))
+        lbl.pack(anchor="w")
+        def worker():
+            try:
+                r = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={self.lat}&longitude={self.lon}&current_weather=true", timeout=8).json()
+                c = r.get("current_weather", {})
+                self._safe_after(0, lambda: lbl.configure(text=f"Temp: {c.get('temperature')} °C\nWind: {c.get('windspeed')} km/h") if safe_exists(lbl) else None)
+            except Exception as e:
+                self._safe_after(0, lambda: lbl.configure(text=str(e)) if safe_exists(lbl) else None)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _global_search(self):
+        q = self.search.get().strip()
+        if not q:
+            return
+        self._navigate("home")
+        self._h(f"Search: {q}")
+        items = _tv_filter([q], limit=500)
+        self._fill_list(items, self.scroll)
+
+    def _fill_list(self, items, parent, nav=None, compact=False):
+        """Render media list in the scroll area BELOW the player (never a new window).
+        compact=True → fast row list (TV/FM); False → card grid (home / search)."""
+        if nav is not None and nav != self._nav_id:
+            return
+        if not safe_exists(parent):
+            return
+
+        # Keep header labels already packed; only clear previous list containers
+        # by destroying everything then re-showing is handled by callers that
+        # already cleared on navigate. Here we just append list content.
+        # If parent still has a loading label, remove non-header children carefully:
+        # Callers pass a clean parent after status destroy.
+
+        norm = []
+        for it in items:
+            if not it:
+                continue
+            if len(it) >= 4:
+                norm.append((it[0], it[1], it[2], it[3]))
+            elif len(it) == 3:
+                norm.append((it[0], it[1], it[2], ""))
+            elif len(it) == 2:
+                norm.append((it[0], it[1], "video", ""))
+        self.current_media_items = [(t[0], t[1], t[2]) for t in norm]
+
+        count_lbl = ctk.CTkLabel(
+            parent,
+            text=f"  {len(norm)} items · click Play · stays in this window",
+            font=ctk.CTkFont(size=11),
+            text_color=C["muted"],
+        )
+        count_lbl.pack(anchor="w", pady=(0, 6))
+
+        if not norm:
+            empty_box = ctk.CTkFrame(parent, fg_color=C["glass"], corner_radius=16,
+                                     border_width=1, border_color=C["glass_border"])
+            empty_box.pack(pady=28, padx=40, fill="x")
+            ctk.CTkLabel(empty_box, text="No channels found in this category",
+                         font=ctk.CTkFont(size=14, weight="bold"), text_color=C["accent"]).pack(pady=(18, 6))
+            ctk.CTkLabel(empty_box, text="Try All Channels, News, or Search — or check tv.txt is next to the app.",
+                         font=ctk.CTkFont(size=11), text_color=C["muted"]).pack(pady=(0, 18))
+            return
+
+        # -------- COMPACT ROW LIST (TV / FM — modern alternating rows) --------
+        if compact:
+            list_fr = ctk.CTkFrame(parent, fg_color="transparent")
+            list_fr.pack(fill="both", expand=True, pady=2)
+            max_show = min(len(norm), 250)  # keep UI snappy
+
+            for i, (title, url, mtype, logo_url) in enumerate(norm[:max_show]):
+                if not safe_exists(parent):
+                    return
+                is_local = not str(url).startswith("http")
+                low_t = (title or "").lower()
+                if is_local:
+                    badge, bcol = "LOCAL", C["accent2"]
+                elif mtype == "audio" or "fm" in low_t or "radio" in low_t:
+                    badge, bcol = "FM", C["success"]
+                else:
+                    badge, bcol = "LIVE", C["stop_btn"]
+                icon = "📁" if is_local else ("📻" if mtype == "audio" else "📺")
+                row_bg = C["row"] if i % 2 == 0 else C["row_alt"]
+
+                row = ctk.CTkFrame(
+                    list_fr, fg_color=row_bg, corner_radius=12,
+                    border_width=1, border_color=C["glass_border"], height=54,
+                )
+                row.pack(fill="x", padx=2, pady=2)
+                row.pack_propagate(False)
+
+                # Icon chip
+                chip = ctk.CTkFrame(row, width=40, height=40, fg_color=C["card"], corner_radius=10)
+                chip.pack(side="left", padx=(8, 6), pady=6)
+                chip.pack_propagate(False)
+                ctk.CTkLabel(chip, text=icon, font=ctk.CTkFont(size=16),
+                             text_color=C["accent"]).pack(expand=True)
+
+                mid = ctk.CTkFrame(row, fg_color="transparent")
+                mid.pack(side="left", fill="x", expand=True)
+                ctk.CTkLabel(mid, text=(title or "Channel")[:68],
+                             font=ctk.CTkFont(size=13, weight="bold"),
+                             text_color=C["fg"], anchor="w").pack(anchor="w")
+                ctk.CTkLabel(mid, text=f"● {badge}   #{i+1}",
+                             font=ctk.CTkFont(size=10, weight="bold"),
+                             text_color=bcol, anchor="w").pack(anchor="w")
+                ctk.CTkButton(
+                    row, text="▶  Play", width=86, height=32,
+                    fg_color=C["play_btn"], text_color="#001018",
+                    corner_radius=16, font=ctk.CTkFont(size=12, weight="bold"),
+                    hover_color="#00d4b8",
+                    command=lambda tt=title, u=url, m=mtype: self._play(tt, u, m),
+                ).pack(side="right", padx=10)
+            if len(norm) > max_show:
+                ctk.CTkLabel(list_fr,
+                             text=f"Showing first {max_show} of {len(norm)} — use Search to narrow",
+                             text_color=C["muted"], font=ctk.CTkFont(size=11)).pack(pady=8)
+            return
+
+        # -------- CARD GRID (home / smaller lists) --------
+        grid = ctk.CTkFrame(parent, fg_color="transparent")
+        grid.pack(fill="both", expand=True, pady=4)
+        cols = 3
+        colors = ["#0a2a32", "#0e1a28", "#0a2a1a", "#1a2030", "#0a2830", "#0a2525", "#122830"]
+
+        for i, (title, url, mtype, logo_url) in enumerate(norm[:300]):
+            if not safe_exists(parent):
+                return
+            r, c = divmod(i, cols)
+            card = ctk.CTkFrame(grid, width=340, height=168, fg_color=C["glass"],
+                                corner_radius=14, border_width=1, border_color=C["glass_border"])
+            card.grid(row=r, column=c, padx=8, pady=8, sticky="nsew")
+            card.pack_propagate(False)
+            bg = colors[i % len(colors)]
+
+            thumb_fr = ctk.CTkFrame(card, height=72, fg_color=bg, corner_radius=10)
+            thumb_fr.pack(fill="x", padx=8, pady=(8, 4))
+            thumb_fr.pack_propagate(False)
+
+            clean = (title or "").replace("📻 ", "").replace("📺 ", "").strip()
+            letter = (clean[:1] or "◆").upper()
+            is_local = not str(url).startswith("http")
+            icon = "📁" if is_local else ("📺" if mtype == "video" else ("📻" if mtype == "audio" else "▶"))
+
+            ctk.CTkLabel(thumb_fr, text=f"{icon}  {letter}", font=ctk.CTkFont(size=18, weight="bold"),
+                         text_color="#ffffff").pack(pady=16)
+
+            ctk.CTkLabel(card, text=(title or "")[:42], font=ctk.CTkFont(size=12, weight="bold"),
+                         text_color=C["fg"], anchor="w").pack(fill="x", padx=10, pady=(2, 0))
+            meta = "● LOCAL" if is_local else ("● ON AIR" if mtype == "video" else "📻 LIVE")
+            ctk.CTkLabel(card, text=meta, font=ctk.CTkFont(size=9),
+                         text_color=C["muted"], anchor="w").pack(fill="x", padx=10)
+
+            bot = ctk.CTkFrame(card, fg_color="transparent")
+            bot.pack(fill="x", padx=8, pady=(4, 8))
+            ctk.CTkButton(bot, text="▶ Play", width=80, height=28, fg_color=C["accent"], text_color="#000",
+                          corner_radius=8, font=ctk.CTkFont(size=12, weight="bold"),
+                          command=lambda tt=title, u=url, m=mtype: self._play(tt, u, m)).pack(side="right")
+
+        for c in range(cols):
+            grid.grid_columnconfigure(c, weight=1)
+
+    def _logo(self, title, sub="Now Playing", mtype="video"):
+        try:
+            self.logo_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.audio_viz.place_forget()
+            self.logo_canvas.delete("all")
+            w = max(self.video_panel.winfo_width() or 1000, 400)
+            h = max(self.video_panel.winfo_height() or 400, 200)
+            self.logo_canvas.create_rectangle(0, 0, w, h, fill="#030b0f", outline="")
+            self.logo_canvas.create_oval(w*0.1, h*0.2, w*0.55, h*0.9, fill="#0a2830", outline="")
+            self.logo_canvas.create_oval(w*0.45, h*0.05, w*0.95, h*0.7, fill="#061820", outline="")
+            for _ in range(160):
+                x, y = random.randint(0, w), random.randint(0, h)
+                s = random.choice([1, 1, 1, 2])
+                col = random.choice(["#ffffff", "#a8fff0", "#ffb8e0", "#c8f0ff"])
+                self.logo_canvas.create_oval(x, y, x+s, y+s, fill=col, outline="")
+            cx, cy = w//2, h//2
+            self.logo_canvas.create_oval(cx-100, cy-80, cx+100, cy+90, fill="#041418", outline="#1a5a6e", width=1)
+            self.logo_canvas.create_oval(cx-88, cy-72, cx+88, cy+82, fill="#061820", outline=C["accent"], width=2)
+            icon = "📁" if mtype == "local" else ("📺" if mtype == "video" else "📻")
+            self.logo_canvas.create_text(cx, cy-30, text=icon, font=("Segoe UI", 36), fill=C["accent"])
+            self.logo_canvas.create_text(cx, cy+18, text=title[:34], font=("Segoe UI", 13, "bold"), fill="#e8fbff")
+            self.logo_canvas.create_text(cx, cy+40, text=sub, font=("Segoe UI", 11), fill=C["accent2"])
+            self.logo_canvas.create_text(cx, h-18, text="🌊 Neon Aurora · ProwinKepler", font=("Segoe UI", 10), fill="#3a7a8a")
+        except Exception:
+            pass
+
+    def _init_vlc(self):
+        if not VLC_AVAILABLE:
+            self.now_sub.configure(text="Install VLC 64-bit from videolan.org")
+            self.status.configure(text="● Offline", text_color=C["warning"])
+            return
+        try:
+            self.video_panel.update_idletasks()
+            hwnd = self.video_panel.winfo_id()
+            if not hwnd:
+                self._safe_after(500, self._init_vlc)
+                return
+            opts = [
+                "--intf", "dummy",
+                "--no-video-title-show",
+                "--quiet",
+                "--no-qt-privacy-ask",
+                "--network-caching=3000",
+                "--live-caching=3000",
+                "--sout-mux-caching=3000",
+                "--clock-jitter=0",
+                "--clock-synchro=0",
+            ]
+            if sys.platform.startswith("linux"):
+                opts.append("--no-xlib")
+            self.vlc_instance = vlc.Instance(*opts)
+            self.vlc_player = self.vlc_instance.media_player_new()
+            self._bind_video_window()
+            self._vlc_ready = True
+            self.now_sub.configure(text="Select a channel")
+            self.status.configure(text="● Online", text_color=C["success"])
+        except Exception as e:
+            print(f"[VLC] {e}")
+            self.status.configure(text="● Offline", text_color=C["warning"])
+            self._vlc_ready = False
+
+    def _bind_video_window(self):
+        if not self.vlc_player:
+            return
+        try:
+            self.video_panel.update_idletasks()
+            hwnd = int(self.video_panel.winfo_id())
+            if sys.platform == "win32":
+                self.vlc_player.set_hwnd(hwnd)
+            elif sys.platform == "darwin":
+                try:
+                    self.vlc_player.set_nsobject(hwnd)
+                except Exception:
+                    self.vlc_player.set_hwnd(hwnd)
+            else:
+                self.vlc_player.set_xwindow(hwnd)
+        except Exception as e:
+            print(f"[VLC bind] {e}")
+
+    def _play(self, title, url, mtype):
+        if mtype == "link" or not url:
+            self._logo(title, "No stream", mtype)
+            self.now_sub.configure(text="No URL")
+            self._set_play_status("stop")
+            return
+        # Ensure VLC is ready / re-bind video HWND (Windows often needs this)
+        if VLC_AVAILABLE and not getattr(self, "_vlc_ready", False):
+            try:
+                self._init_vlc()
+            except Exception as e:
+                print(f"[VLC re-init] {e}")
+        if VLC_AVAILABLE and self.vlc_player:
+            try:
+                self.vlc_player.stop()
+            except Exception:
+                pass
+            self._bind_video_window()
+        if not VLC_AVAILABLE:
+            self.now_sub.configure(text="Install VLC 64-bit (same bitness as Python)")
+            self._logo(title, "No VLC", mtype)
+            self._set_play_status("error")
+            print("[PLAY] VLC not available — install 64-bit VLC + pip install python-vlc")
+            return
+        self._logo(title, "Loading…", mtype)
+        self.now_title.configure(text=title[:48])
+        self.now_sub.configure(text="Waiting…")
+        self._set_play_status("wait")
+        self._current_play_url = url
+        self._current_play_title = title
+        self._current_play_mtype = mtype
+
+        is_local = not str(url).startswith("http") and os.path.isfile(str(url))
+        view = getattr(self, "_current_view", "") or ""
+        is_tv = (
+            view.startswith("tv_")
+            or view.startswith("fm_")
+            or view in ("tamilfm", "englishfm", "hindifm")
+            or (mtype == "video" and not is_local and "youtube" not in (url or "").lower() and "youtu.be" not in (url or "").lower())
+        )
+        if view.startswith(("music_", "mov_", "yt_", "pod_", "ab_", "local_", "av_")) or "youtube" in (url or "").lower() or is_local:
+            is_tv = False
+        self._is_live_tv = is_tv
+
+        # Live ON AIR label only for TV + FM
+        try:
+            if is_tv:
+                self.live_lbl.configure(text="● ON AIR", text_color="#ff2244")
+                self.progress.set(0)
+                self.time_lbl.configure(text="--:--")
+                self.dur_lbl.configure(text="LIVE")
+            else:
+                self.live_lbl.configure(text="")
+        except Exception:
+            pass
+
+        if view.startswith(("yt_", "music_")):
+            self._auto_next = True
+        else:
+            self._auto_next = False
+
+        if mtype in ("audio", "video") and not is_tv:
+            self._show_lyrics(title)
+        try:
+            self.current_media_index = next(
+                i for i, (tt, u, m) in enumerate(self.current_media_items)
+                if tt == title and u == url
+            )
+        except StopIteration:
+            self.current_media_index = -1
+        self._stop(keep=True)
+
+        def worker():
+            play_url = url
+            try:
+                if is_local:
+                    play_url = url
+                elif YTDLP_AVAILABLE and any(x in play_url for x in ("youtube.com", "youtu.be", "youtu")):
+                    try:
+                        yopts = {
+                            "quiet": True, "no_warnings": True, "noplaylist": True,
+                            "format": "best[height<=720][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/best",
+                            "nocheckcertificate": True,
+                            "writesubtitles": False,
+                            "writeautomaticsub": False,
+                        }
+                        with yt_dlp.YoutubeDL(yopts) as ydl:
+                            info = ydl.extract_info(play_url, download=False)
+                            play_url = info.get("url") or play_url
+                            if info.get("formats"):
+                                if mtype == "audio":
+                                    for f in reversed(info["formats"]):
+                                        if f.get("url") and f.get("acodec") not in (None, "none"):
+                                            play_url = f["url"]
+                                            break
+                                else:
+                                    for f in reversed(info["formats"]):
+                                        if (f.get("url") and
+                                            f.get("vcodec") not in (None, "none") and
+                                            f.get("acodec") not in (None, "none")):
+                                            play_url = f["url"]
+                                            break
+                            subs_note = ""
+                            if info.get("subtitles") or info.get("automatic_captions"):
+                                subs_note = "\n\n[Auto-subtitles available on this video]"
+                            desc = (info.get("description") or "")[:800]
+                            if desc:
+                                def _upd_sub(d=desc, t=title, n=subs_note):
+                                    if safe_exists(getattr(self, "lyrics_box", None)):
+                                        self.lyrics_box.configure(state="normal")
+                                        self.lyrics_box.delete("1.0", "end")
+                                        self.lyrics_box.insert("end", f"♪  {t}\n{n}\n\n{d}")
+                                        self.lyrics_box.configure(state="disabled")
+                                self._safe_after(0, _upd_sub)
+                    except Exception as ye:
+                        print(f"[yt-dlp] {ye}")
+                        self._safe_after(0, lambda: (
+                            self.now_sub.configure(text="Stream failed — try another"),
+                            self._set_play_status("stop"),
+                        ))
+                        return
+
+                if not (VLC_AVAILABLE and self.vlc_player):
+                    self._safe_after(0, self._init_vlc)
+
+                if VLC_AVAILABLE and self.vlc_player:
+                    def start_vlc(u=play_url, ttl=title, mt=mtype, local=is_local):
+                        try:
+                            if not self._vlc_ready:
+                                self._init_vlc()
+                            self._bind_video_window()
+                            try:
+                                if mt == "audio":
+                                    self.logo_canvas.place_forget()
+                                    self._audio_mode()
+                                else:
+                                    self.logo_canvas.place_forget()
+                                    self.audio_viz.place_forget()
+                            except Exception:
+                                pass
+                            media = self.vlc_instance.media_new(u)
+                            # Strong VLC options for live Tamil / Cartoon / IPTV HLS
+                            is_live_stream = bool(getattr(self, "_is_live_tv", False)) or (
+                                isinstance(u, str) and any(x in u.lower() for x in (".m3u8", ".m3u", "/hls/", "live"))
+                            )
+                            if not local:
+                                if is_live_stream:
+                                    media.add_option(":network-caching=4000")
+                                    media.add_option(":live-caching=4000")
+                                    media.add_option(":file-caching=2000")
+                                    media.add_option(":sout-mux-caching=2000")
+                                    media.add_option(":clock-jitter=0")
+                                    media.add_option(":clock-synchro=0")
+                                    media.add_option(":http-reconnect=true")
+                                    media.add_option(":http-continuous=true")
+                                    media.add_option(":hls-segment-threads=3")
+                                else:
+                                    media.add_option(":network-caching=2500")
+                                    media.add_option(":live-caching=2500")
+                                    media.add_option(":file-caching=1500")
+                                    media.add_option(":http-reconnect=true")
+                                media.add_option(":http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                media.add_option(":no-http-forward-cookies")
+                            media.add_option(":avcodec-hw=any")
+                            media.add_option(":avcodec-fast")
+                            media.add_option(":sub-autodetect-file")
+                            media.add_option(":sub-track=0")
+                            # Prefer hardware when available; keep software fallback inside VLC
+                            self.vlc_player.set_media(media)
+                            try:
+                                self.vlc_player.audio_set_mute(getattr(self, "_muted", False))
+                                self.vlc_player.audio_set_volume(int(self.vol.get()))
+                                self.vlc_player.set_rate(getattr(self, "_speed", 1.0))
+                            except Exception:
+                                pass
+                            self._set_play_status("going" if not local else "local")
+                            self.now_sub.configure(text="Starting…")
+                            self.vlc_player.play()
+                            self._safe_after(300, self._bind_video_window)
+                            self._safe_after(800, self._bind_video_window)
+                            self._safe_after(1200, self._start_progress)
+                            self._safe_after(2000, lambda: self._check(ttl, mt))
+                            self._safe_after(5000, lambda: self._check(ttl, mt))
+                        except Exception as ex:
+                            print(f"[VLC play] {ex}")
+                            self._logo(ttl, "Failed", mt)
+                            self.now_sub.configure(text="Play failed — try another")
+                            self._set_play_status("stop")
+                    self._safe_after(0, start_vlc)
+                    return
+
+                if mtype == "audio" and PYGAME_AVAILABLE and not is_local:
+                    self._safe_after(0, lambda: self._audio_mode())
+                    req = urllib.request.Request(play_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        data = io.BytesIO(r.read())
+                    pygame.mixer.music.load(data)
+                    pygame.mixer.music.set_volume(self.vol.get() / 100)
+                    pygame.mixer.music.play()
+                    self._safe_after(0, lambda: (
+                        self.now_sub.configure(text="Audio playing"),
+                        self._set_play_status("play"),
+                    ))
+                    self._animate()
+                else:
+                    self._safe_after(0, lambda: (
+                        self._logo(title, "Install VLC 64-bit", mtype),
+                        self.now_sub.configure(text="Install VLC to play video"),
+                        self._set_play_status("stop"),
+                    ))
+            except Exception as e:
+                print(f"[Play] {e}")
+                self._safe_after(0, lambda: (
+                    self._logo(title, "Failed", mtype),
+                    self.now_sub.configure(text="Try another channel"),
+                    self._set_play_status("stop"),
+                ))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check(self, title, mtype):
+        if not self.vlc_player:
+            return
+        try:
+            state = self.vlc_player.get_state()
+            if state in (vlc.State.Playing, vlc.State.Opening, vlc.State.Buffering):
+                self.now_sub.configure(text="▶ Playing")
+                status_mode = "play"
+                if mtype == "audio":
+                    status_mode = "radio"
+                elif "youtube" in title.lower() or "yt" in title.lower():
+                    status_mode = "yt"
+                self._set_play_status(status_mode if state == vlc.State.Playing else "going")
+                self._start_progress()
+
+                if mtype == "audio":
+                    try:
+                        self.logo_canvas.place_forget()
+                        self._audio_mode()
+                        self._animate_vlc_audio()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.logo_canvas.place_forget()
+                        self.audio_viz.place_forget()
+                    except Exception:
+                        pass
+            elif state == vlc.State.Ended:
+                if getattr(self, "_loop", False):
+                    self.vlc_player.set_time(0)
+                    self.vlc_player.play()
+                elif getattr(self, "_auto_next", False) and self.current_media_index >= 0:
+                    self._safe_after(400, self._next)
+                else:
+                    self._set_play_status("stop")
+                    self.now_sub.configure(text="Ended")
+            else:
+                self._logo(title, "Unavailable", mtype)
+                self.now_sub.configure(text="Try Test Stream / another channel")
+                self._set_play_status("error" if state == vlc.State.Error else "stop")
+        except Exception:
+            pass
+
+    def _fmt_time(self, ms):
+        if ms is None or ms < 0:
+            return "00:00"
+        s = int(ms // 1000)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m:02d}:{s:02d}"
+
+    def _start_progress(self):
+        if getattr(self, "_is_live_tv", False):
+            try:
+                self.progress.set(0)
+                self.time_lbl.configure(text="--:--")
+                self.dur_lbl.configure(text="LIVE")
+            except Exception:
+                pass
+            return
+        if self._progress_job:
+            try:
+                self.after_cancel(self._progress_job)
+            except Exception:
+                pass
+        self._update_progress()
+
+    def _update_progress(self):
+        try:
+            if getattr(self, "_is_live_tv", False):
+                try:
+                    self.progress.set(0)
+                    self.time_lbl.configure(text="--:--")
+                    self.dur_lbl.configure(text="LIVE")
+                except Exception:
+                    pass
+                return
+            if not (self.vlc_player and self._vlc_ready):
+                return
+            state = self.vlc_player.get_state()
+            if state == vlc.State.Ended:
+                if getattr(self, "_loop", False):
+                    self.vlc_player.set_time(0)
+                    self.vlc_player.play()
+                    return
+                if getattr(self, "_auto_next", False):
+                    self._safe_after(300, self._next)
+                return
+            if state not in (vlc.State.Playing, vlc.State.Paused, vlc.State.Buffering):
+                return
+            if not getattr(self, "_seek_dragging", False):
+                length = self.vlc_player.get_length()
+                pos = self.vlc_player.get_time()
+                if length and length > 0:
+                    self.progress.configure(to=max(1000, length))
+                    self.progress.set(max(0, min(pos, length)))
+                    self.time_lbl.configure(text=self._fmt_time(pos))
+                    self.dur_lbl.configure(text=self._fmt_time(length))
+                else:
+                    self.progress.configure(to=1000)
+                    self.progress.set(0)
+                    self.time_lbl.configure(text=self._fmt_time(pos if pos > 0 else 0))
+                    self.dur_lbl.configure(text="LIVE")
+            self._progress_job = self.after(500, self._update_progress)
+        except Exception:
+            try:
+                self._progress_job = self.after(1000, self._update_progress)
+            except Exception:
+                pass
+
+    def _on_seek(self, value):
+        if getattr(self, "_is_live_tv", False):
+            return
+        if not (self.vlc_player and self._vlc_ready):
+            return
+        try:
+            self._seek_dragging = True
+            ms = int(float(value))
+            self.vlc_player.set_time(ms)
+            self.time_lbl.configure(text=self._fmt_time(ms))
+            self._safe_after(400, lambda: setattr(self, "_seek_dragging", False))
+        except Exception:
+            self._seek_dragging = False
+
+    def _audio_mode(self):
+        try:
+            self.logo_canvas.place_forget()
+            self.audio_viz.place(relx=0.5, rely=0.5, anchor="center", width=360, height=170)
+        except Exception:
+            pass
+
+    def _animate(self):
+        if not PYGAME_AVAILABLE:
+            return
+        try:
+            if not pygame.mixer.music.get_busy():
+                if getattr(self, "_auto_next", False):
+                    self._safe_after(200, self._next)
+                return
+        except Exception:
+            return
+        for b in self._viz_bars:
+            h = random.randint(12, 140)
+            try:
+                c = self.audio_viz.coords(b)
+                self.audio_viz.coords(b, c[0], 90 - h // 2, c[2], 90 + h // 2)
+            except Exception:
+                return
+        self._safe_after(90, self._animate)
+
+    def _animate_vlc_audio(self):
+        if not (VLC_AVAILABLE and self.vlc_player and self._vlc_ready):
+            return
+        try:
+            state = self.vlc_player.get_state()
+            if state == vlc.State.Ended:
+                if getattr(self, "_loop", False):
+                    self.vlc_player.set_time(0)
+                    self.vlc_player.play()
+                    return
+                if getattr(self, "_auto_next", False):
+                    self._safe_after(300, self._next)
+                return
+            if state not in (vlc.State.Playing,):
+                return
+        except Exception:
+            return
+        for b in self._viz_bars:
+            h = random.randint(12, 140)
+            try:
+                c = self.audio_viz.coords(b)
+                self.audio_viz.coords(b, c[0], 90 - h // 2, c[2], 90 + h // 2)
+            except Exception:
+                return
+        self._safe_after(90, self._animate_vlc_audio)
+
+    def _play_btn(self):
+        if self.vlc_player and self._vlc_ready:
+            self.vlc_player.play()
+            self._start_progress()
+            try:
+                self.logo_canvas.place_forget()
+            except Exception:
+                pass
+        elif PYGAME_AVAILABLE:
+            try:
+                pygame.mixer.music.unpause()
+            except Exception:
+                pass
+
+    def _pause(self):
+        if self.vlc_player and self._vlc_ready:
+            self.vlc_player.pause()
+        elif PYGAME_AVAILABLE:
+            try:
+                pygame.mixer.music.pause()
+            except Exception:
+                pass
+
+    def _stop(self, keep=False):
+        if self._progress_job:
+            try:
+                self.after_cancel(self._progress_job)
+            except Exception:
+                pass
+            self._progress_job = None
+        if self.vlc_player:
+            try:
+                self.vlc_player.stop()
+            except Exception:
+                pass
+        if PYGAME_AVAILABLE:
+            try:
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+        if not keep:
+            self.now_title.configure(text="Nothing playing")
+            self.now_sub.configure(text="Stopped")
+            self._set_play_status("stop")
+            self._logo("ProwinKepler", "Select media")
+            try:
+                self.progress.set(0)
+                self.time_lbl.configure(text="00:00")
+                self.dur_lbl.configure(text="00:00")
+                self.live_lbl.configure(text="")
+            except Exception:
+                pass
+        try:
+            self.audio_viz.place_forget()
+        except Exception:
+            pass
+
+    def _prev(self):
+        if self.current_media_index > 0:
+            self.current_media_index -= 1
+            t, u, m = self.current_media_items[self.current_media_index]
+            self._play(t, u, m)
+
+    def _next(self):
+        if not self.current_media_items:
+            return
+        if 0 <= self.current_media_index < len(self.current_media_items) - 1:
+            self.current_media_index += 1
+        else:
+            self.current_media_index = 0
+        t, u, m = self.current_media_items[self.current_media_index]
+        self._play(t, u, m)
+
+    def _seek(self, seconds):
+        if getattr(self, "_is_live_tv", False):
+            return
+        if self.vlc_player and self._vlc_ready:
+            try:
+                t = self.vlc_player.get_time()
+                if t >= 0:
+                    self.vlc_player.set_time(max(0, t + seconds * 1000))
+                    self._update_progress()
+            except Exception:
+                pass
+
+    def _toggle_mute(self):
+        self._muted = not getattr(self, "_muted", False)
+        if self.vlc_player and self._vlc_ready:
+            try:
+                self.vlc_player.audio_set_mute(self._muted)
+            except Exception:
+                pass
+
+    def _toggle_loop(self):
+        self._loop = not getattr(self, "_loop", False)
+        try:
+            if self._loop:
+                self.loop_btn.configure(fg_color=C["accent"], text_color="#000")
+            else:
+                self.loop_btn.configure(fg_color=C["card"], text_color=C["fg"])
+        except Exception:
+            pass
+
+    def _toggle_cc(self):
+        self._cc_on = not getattr(self, "_cc_on", False)
+        try:
+            if self._cc_on:
+                self.cc_btn.configure(fg_color=C["accent"], text_color="#000")
+                if self.vlc_player and self._vlc_ready:
+                    self.vlc_player.video_set_spu(0)
+            else:
+                self.cc_btn.configure(fg_color=C["card"], text_color=C["fg"])
+                if self.vlc_player and self._vlc_ready:
+                    self.vlc_player.video_set_spu(-1)
+        except Exception:
+            pass
+
+    def _open_player_settings(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Player Settings")
+        win.geometry("420x360")
+        win.configure(fg_color=C["bg"])
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text="⚙ Player Settings", font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=C["accent"]).pack(pady=(16, 8))
+
+        # Speed
+        ctk.CTkLabel(win, text="Video / Audio Speed 📹", text_color=C["fg"]).pack(anchor="w", padx=20)
+        speed_fr = ctk.CTkFrame(win, fg_color="transparent")
+        speed_fr.pack(fill="x", padx=20, pady=4)
+        for s in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]:
+            ctk.CTkButton(speed_fr, text=f"{s}x", width=52, height=28, fg_color=C["card2"],
+                          command=lambda sp=s: self._set_speed(sp)).pack(side="left", padx=3)
+
+        # Subtitle file
+        ctk.CTkLabel(win, text="Add Subtitle File (.srt / .vtt)", text_color=C["fg"]).pack(anchor="w", padx=20, pady=(12, 2))
+        def add_sub():
+            f = filedialog.askopenfilename(filetypes=[("Subtitles", "*.srt *.vtt *.ass"), ("All", "*.*")])
+            if f and self.vlc_player and self._vlc_ready:
+                try:
+                    self.vlc_player.video_set_subtitle_file(f)
+                    messagebox.showinfo("Subtitles", f"Loaded: {os.path.basename(f)}")
+                except Exception as e:
+                    messagebox.showerror("Error", str(e))
+        ctk.CTkButton(win, text="Choose Subtitle File…", width=200, height=32, fg_color=C["card"],
+                      command=add_sub).pack(padx=20, pady=4, anchor="w")
+
+        # Audio track
+        ctk.CTkLabel(win, text="Audio Language / Track", text_color=C["fg"]).pack(anchor="w", padx=20, pady=(12, 2))
+        def list_audio():
+            if not (self.vlc_player and self._vlc_ready):
+                messagebox.showinfo("Audio", "No media playing")
+                return
+            try:
+                tracks = self.vlc_player.audio_get_track_description()
+                if tracks:
+                    msg = "\n".join([f"{t[0]}: {t[1]}" for t in tracks])
+                    messagebox.showinfo("Audio Tracks", msg)
+                else:
+                    messagebox.showinfo("Audio", "No alternate tracks found")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+        ctk.CTkButton(win, text="Show Audio Tracks…", width=200, height=32, fg_color=C["card"],
+                      command=list_audio).pack(padx=20, pady=4, anchor="w")
+
+        ctk.CTkButton(win, text="Close", width=100, height=32, fg_color=C["accent"], text_color="#000",
+                      command=win.destroy).pack(pady=20)
+
+    def _set_speed(self, rate):
+        self._speed = rate
+        if self.vlc_player and self._vlc_ready:
+            try:
+                self.vlc_player.set_rate(rate)
+                self.now_sub.configure(text=f"Speed: {rate}x")
+            except Exception:
+                pass
+
+    def _vol(self, v):
+        vol = int(float(v))
+        if self.vlc_player and self._vlc_ready:
+            try:
+                self.vlc_player.audio_set_mute(getattr(self, "_muted", False))
+                self.vlc_player.audio_set_volume(vol)
+            except Exception:
+                pass
+        elif PYGAME_AVAILABLE:
+            try:
+                pygame.mixer.music.set_volume(vol / 100)
+            except Exception:
+                pass
+
+    def _download_current(self):
+        url = getattr(self, "_current_play_url", "") or ""
+        title = getattr(self, "_current_play_title", "") or "download"
+        mtype = getattr(self, "_current_play_mtype", "") or "video"
+        view = getattr(self, "_current_view", "") or ""
+
+        if not url or mtype == "link":
+            self.now_sub.configure(text="Nothing to download")
+            return
+        if not YTDLP_AVAILABLE:
+            self.now_sub.configure(text="pip install -U yt-dlp required")
+            return
+        if not str(url).startswith("http"):
+            self.now_sub.configure(text="Already a local file")
+            return
+
+        is_youtube = any(x in url.lower() for x in ("youtube.com", "youtu.be", "youtu"))
+        is_audio_target = view.startswith(("music_", "pod_", "ab_")) or mtype == "audio"
+
+        if not is_youtube and not is_audio_target:
+            self.now_sub.configure(text="Download only for YT / Music / Podcast / Audiobook")
+            return
+
+        safe_name = re.sub(r'[\\/*?:"<>|]', "", title)[:80].strip() or "download"
+        out_tmpl = os.path.join(self._download_dir, safe_name + ".%(ext)s")
+
+        self.now_sub.configure(text="Downloading…")
+        self._set_play_status("wait")
+
+        def worker():
+            try:
+                if is_youtube and not is_audio_target:
+                    yopts = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "noplaylist": True,
+                        "outtmpl": out_tmpl,
+                        "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+                        "merge_output_format": "mp4",
+                        "nocheckcertificate": True,
+                    }
+                else:
+                    yopts = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "noplaylist": True,
+                        "outtmpl": out_tmpl,
+                        "format": "bestaudio/best",
+                        "postprocessors": [{
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "192",
+                        }],
+                        "nocheckcertificate": True,
+                    }
+                with yt_dlp.YoutubeDL(yopts) as ydl:
+                    ydl.download([url])
+                self._safe_after(0, lambda: (
+                    self.now_sub.configure(text=f"Saved → {self._download_dir}"),
+                    self._set_play_status("play"),
+                ))
+            except Exception as e:
+                print(f"[Download] {e}")
+                self._safe_after(0, lambda: (
+                    self.now_sub.configure(text=f"Download failed: {str(e)[:40]}"),
+                    self._set_play_status("error"),
+                ))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_lyrics(self, title):
+        try:
+            self._last_lyrics_title = title
+            if not hasattr(self, "lyrics_box") or not safe_exists(self.lyrics_box):
+                return
+            self.lyrics_box.configure(state="normal")
+            self.lyrics_box.delete("1.0", "end")
+            self.lyrics_box.insert("end", f"♪  {title}\n\n")
+            self.lyrics_box.insert("end", "Fetching lyrics…\n")
+            self.lyrics_box.configure(state="disabled")
+            def worker():
+                text = (
+                    f"♪  {title}\n\n"
+                    f"Playing with auto-next enabled.\n"
+                    f"Seek bar tracks progress.\n\n"
+                    f"For full synced lyrics, open the YouTube lyric version of this song.\n"
+                    f"Auto-subtitles load automatically for YouTube when available."
+                )
+                def upd():
+                    if safe_exists(self.lyrics_box):
+                        self.lyrics_box.configure(state="normal")
+                        self.lyrics_box.delete("1.0", "end")
+                        self.lyrics_box.insert("end", text)
+                        self.lyrics_box.configure(state="disabled")
+                self._safe_after(0, upd)
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            pass
+
+    def _set_player_size(self, mode):
+        sizes = {"S": 280, "M": 430, "L": 560, "XL": 720}
+        h = sizes.get(mode, 430)
+        self._size_mode = mode
+        self._player_height = h
+        try:
+            self.player_frame.configure(height=h + 90)
+            self.player_frame.pack_propagate(False)
+            self._safe_after(200, self._bind_video_window)
+            self._safe_after(500, self._bind_video_window)
+            self.now_sub.configure(text=f"Screen size: {mode} ({h}px)")
+        except Exception as e:
+            print(f"[size] {e}")
+
+    def _toggle_fullscreen(self):
+        try:
+            cur = self.attributes("-fullscreen")
+            self.attributes("-fullscreen", not cur)
+            self._safe_after(300, self._bind_video_window)
+            self.now_sub.configure(text="Fullscreen ON" if not cur else "Fullscreen OFF")
+        except Exception:
+            try:
+                if getattr(self, "_maximized", False):
+                    self.geometry("1680x1060")
+                    self._maximized = False
+                else:
+                    self.state("zoomed")
+                    self._maximized = True
+            except Exception as e:
+                print(f"[fullscreen] {e}")
+
+
+if __name__ == "__main__":
+    App().mainloop()
